@@ -1,0 +1,11 @@
+pig-antigravity
+Copyright 2026 owner888
+
+This package is a PHP port of pi-antigravity
+(https://github.com/Rahularya01/pi-antigravity), Copyright (c) 2026 Rahul Arya,
+MIT License: the model discovery and grouping, the request loop and its error
+wording, the account store, quota, image generation and Google Search grounding
+follow that project file by file, and are kept in step with its releases.
+
+The streaming, the Gemini request shapes and the OAuth plumbing are pig's own
+(https://github.com/owner888/pig), MIT License.
