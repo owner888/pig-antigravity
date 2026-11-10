@@ -4,7 +4,7 @@ What changed, newest first, in pig's format: `## Unreleased` while working, `## 
 at release. The version lives in the git tag only, and follows the pi-antigravity release the port
 is in step with.
 
-## Unreleased
+## [0.12.0] - 2026-11-10
 
 ### New Features
 
