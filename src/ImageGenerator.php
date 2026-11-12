@@ -82,6 +82,76 @@ final class ImageGenerator implements ProviderImages
     ) {
     }
 
+    public const int MAX_REFERENCE_IMAGES = 4;
+
+    public const int MAX_REFERENCE_BYTES = 10 * 1024 * 1024;
+
+    /**
+     * The `generate_image` tool's `referenceImages`, read — pi-antigravity 0.13: at most four,
+     * each a project-relative PNG, JPEG, WebP or GIF of at most 10 MB that is still inside the
+     * working directory once its links are followed.
+     *
+     * @param list<mixed> $paths
+     * @return list<ImageContent>
+     */
+    public static function referenceImages(array $paths, string $cwd): array
+    {
+        if (count($paths) > self::MAX_REFERENCE_IMAGES) {
+            throw new InvalidArgumentException('At most ' . self::MAX_REFERENCE_IMAGES . ' reference images are allowed.');
+        }
+
+        if ($paths === []) {
+            return [];
+        }
+
+        $outside = 'Reference image paths must be project-relative and inside the working directory.';
+        $root = realpath($cwd);
+
+        if ($root === false) {
+            throw new RuntimeException("The working directory {$cwd} does not exist.");
+        }
+
+        $images = [];
+
+        foreach ($paths as $path) {
+            if (!is_string($path) || $path === '' || str_starts_with($path, '/') || preg_match('#^[A-Za-z]:[\\\\/]#', $path) === 1) {
+                throw new InvalidArgumentException($outside);
+            }
+
+            $target = realpath($root . DIRECTORY_SEPARATOR . $path);
+
+            if ($target === false) {
+                throw new InvalidArgumentException("Reference image not found: {$path}.");
+            }
+
+            if (!str_starts_with($target, rtrim($root, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR)) {
+                throw new InvalidArgumentException($outside);
+            }
+
+            $mimeType = is_file($target) ? \Pig\Tui\Images\ImageType::ofFile($target) : null;
+
+            if (!in_array($mimeType, ['image/png', 'image/jpeg', 'image/webp', 'image/gif'], true)) {
+                throw new InvalidArgumentException("Unsupported reference image: {$path}. Use PNG, JPEG, WebP, or GIF.");
+            }
+
+            $size = filesize($target);
+
+            if ($size === false || $size > self::MAX_REFERENCE_BYTES) {
+                throw new InvalidArgumentException("Reference image is too large: {$path}. Each reference must be at most 10 MB.");
+            }
+
+            $data = file_get_contents($target);
+
+            if ($data === false) {
+                throw new RuntimeException("Could not read reference image: {$path}.");
+            }
+
+            $images[] = new ImageContent(base64_encode($data), $mimeType);
+        }
+
+        return $images;
+    }
+
     /** @return list<ImageModel> `MODELS` as the provider's image models */
     public static function models(): array
     {
@@ -116,6 +186,15 @@ final class ImageGenerator implements ProviderImages
 
         try {
             [$token, $project] = self::credentials($options->apiKey);
+
+            // pi-antigravity 0.13: nothing is uploaded to a second host while a regional license
+            // is in force.
+            $enterprise = Enterprise::resolve();
+
+            if ($enterprise !== null) {
+                throw new RuntimeException("Image generation is not sent while Gemini Enterprise routing is active (location={$enterprise->location}). Google documents image generation on the global deployment only, and this extension does not upload prompts or reference images to a second host.");
+            }
+
             $prompt = trim(implode("\n", array_map(
                 static fn (TextContent $text): string => $text->text,
                 array_values(array_filter($context->input, static fn (mixed $item): bool => $item instanceof TextContent)),
@@ -213,6 +292,7 @@ final class ImageGenerator implements ProviderImages
                     'requestType' => 'image_gen',
                     'userAgent' => 'antigravity',
                     'requestId' => sprintf('image_gen/%d/%s/1', (int) (microtime(true) * 1000), bin2hex(random_bytes(16))),
+                    ...(Credits::enabled() ? ['enabledCreditTypes' => Credits::CREDIT_TYPES] : []),
                 ];
 
                 if ($options->onPayload !== null) {
@@ -298,7 +378,9 @@ final class ImageGenerator implements ProviderImages
         $token = is_array($decoded) ? ($decoded['token'] ?? null) : null;
         $project = is_array($decoded) ? ($decoded['projectId'] ?? null) : null;
 
-        if (!is_string($token) || $token === '' || !is_string($project) || $project === '') {
+        $printable = static fn (mixed $value): bool => is_string($value) && preg_match('/^[\x21-\x7e]+$/D', $value) === 1;
+
+        if (!$printable($token) || !$printable($project)) {
             throw new ProviderError(
                 'Antigravity needs a token and a Cloud project together, which is what signing in '
                 . 'stores. An ordinary Gemini API key cannot be used with antigravity models.',

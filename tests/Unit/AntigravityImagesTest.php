@@ -144,6 +144,49 @@ final class AntigravityImagesTest extends TestCase
         $this->assertStringContainsString('Bearer ya29.a', $this->server->received());
     }
 
+    public function testReferenceImagesAreReadFromInsideTheProjectOnly(): void
+    {
+        // pi-antigravity 0.13 (#104): up to four project-relative PNG, JPEG, WebP or GIF files,
+        // 10 MB each, still inside the working directory once links are followed.
+        $cwd = sys_get_temp_dir() . '/pig-ag-refs-' . bin2hex(random_bytes(4));
+        mkdir("{$cwd}/art", 0o700, true);
+        $outside = sys_get_temp_dir() . '/pig-ag-refs-outside-' . bin2hex(random_bytes(4)) . '.png';
+        $png = (string) base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', true);
+        file_put_contents("{$cwd}/art/ref.png", $png);
+        file_put_contents("{$cwd}/notes.txt", 'not a picture');
+        file_put_contents($outside, $png);
+        symlink($outside, "{$cwd}/art/link.png");
+
+        try {
+            $this->assertSame([], ImageGenerator::referenceImages([], $cwd));
+
+            $images = ImageGenerator::referenceImages(['art/ref.png'], $cwd);
+            $this->assertCount(1, $images);
+            $this->assertSame(['image/png', base64_encode($png)], [$images[0]->mimeType, $images[0]->data]);
+
+            $inside = 'Reference image paths must be project-relative and inside the working directory.';
+
+            foreach ([
+                [["{$cwd}/art/ref.png"], $inside],
+                [['../' . basename($outside)], $inside],
+                [['art/link.png'], $inside],
+                [['notes.txt'], 'Unsupported reference image: notes.txt. Use PNG, JPEG, WebP, or GIF.'],
+                [['art'], 'Unsupported reference image: art. Use PNG, JPEG, WebP, or GIF.'],
+                [['art/none.png'], 'Reference image not found: art/none.png.'],
+                [['a.png', 'b.png', 'c.png', 'd.png', 'e.png'], 'At most 4 reference images are allowed.'],
+            ] as [$paths, $message]) {
+                try {
+                    ImageGenerator::referenceImages($paths, $cwd);
+                    $this->fail('accepted ' . implode(', ', $paths));
+                } catch (\InvalidArgumentException $error) {
+                    $this->assertSame($message, $error->getMessage());
+                }
+            }
+        } finally {
+            exec('rm -rf ' . escapeshellarg($cwd) . ' ' . escapeshellarg($outside));
+        }
+    }
+
     public function testA404MovesToTheNextModelAndTheResultSaysWhichOneAnswered(): void
     {
         $url = $this->server->startSequence([

@@ -64,12 +64,22 @@ use PigAntigravity\AccountsPanel;
 use PigAntigravity\AntigravityApi;
 use PigAntigravity\AntigravityOauth;
 use PigAntigravity\Catalog;
+use PigAntigravity\Credits;
 use PigAntigravity\Discovery;
+use PigAntigravity\Enterprise;
 use PigAntigravity\GoogleSearch;
 use PigAntigravity\ImageGenerator;
 use PigAntigravity\LazyAntigravityOauth;
 use PigAntigravity\Models;
 use PigAntigravity\QuotaClient;
+use PigAntigravity\Redaction;
+use PigAntigravity\WebFetch\Document;
+use PigAntigravity\WebFetch\Markdown;
+use PigAntigravity\WebFetch\ReadUrlContent;
+use PigAntigravity\WebFetch\SavedPage;
+use PigAntigravity\WebFetch\Text;
+use PigAntigravity\WebFetch\WebFetch;
+use PigAntigravity\WebFetch\WebFetchError;
 
 // The file is named after the extension because pig names an extension by its file: settings
 // that say `"disabledExtensions": ["pig-antigravity"]` from the days it was bundled with pig still
@@ -355,10 +365,11 @@ return function (ExtensionApi $pig): void {
      * this provider's image model — the path codemode's `$models->generateImages()` takes — with the
      * active account's key, then the images saved. A registered model, or the id as asked for.
      *
+     * @param list<ImageContent> $references images to send beside the prompt
      * @return array{0: AssistantImages, 1: list<string>} the answer and the paths written
      * @throws RuntimeException with the answer's own error when there is no image
      */
-    $generateAndSave = static function (string $prompt, string $ratio, string $model, ?string $targetPath, string $cwd, ?AbortSignal $signal) use ($getAuthAndToken): array {
+    $generateAndSave = static function (string $prompt, string $ratio, string $model, ?string $targetPath, string $cwd, ?AbortSignal $signal, array $references = []) use ($getAuthAndToken): array {
         $authData = $getAuthAndToken();
 
         if ($authData === null) {
@@ -371,7 +382,7 @@ return function (ExtensionApi $pig): void {
         \assert($imageModel instanceof \Pig\Ai\ImageModel);
         $result = \Pig\Ai\Models::generateImages(
             $imageModel,
-            new ImagesContext([new TextContent($prompt)]),
+            new ImagesContext([new TextContent($prompt), ...$references]),
             new ImagesOptions(
                 signal: $signal,
                 apiKey: (string) json_encode(['token' => $token, 'projectId' => $projectId]),
@@ -576,7 +587,8 @@ return function (ExtensionApi $pig): void {
             $noExtraTools = (getenv('ANTIGRAVITY_NO_EXTRA_TOOLS') ?: getenv('NOAGY_NO_EXTRA_TOOLS')) === '1';
             $noSearchTool = $noExtraTools || (getenv('ANTIGRAVITY_NO_SEARCH_TOOL') ?: getenv('NOAGY_NO_SEARCH_TOOL')) === '1';
             $noImageTool = $noExtraTools || (getenv('ANTIGRAVITY_NO_IMAGE_TOOL') ?: getenv('NOAGY_NO_IMAGE_TOOL')) === '1';
-            $activeTools = array_keys(array_filter(['generate_image' => !$noImageTool, 'google_search' => !$noSearchTool]));
+            $noFetchTool = $noExtraTools || (getenv('ANTIGRAVITY_NO_FETCH_TOOL') ?: getenv('NOAGY_NO_FETCH_TOOL')) === '1';
+            $activeTools = array_keys(array_filter(['generate_image' => !$noImageTool, 'google_search' => !$noSearchTool, 'read_url_content' => !$noFetchTool]));
 
             $emit($ctx, implode("\n", [
                 'Antigravity doctor',
@@ -586,11 +598,72 @@ return function (ExtensionApi $pig): void {
                 'linkedAccounts=' . count($accounts->accounts()),
                 'projectId=' . $projectId,
                 'tokenStatus=' . $tokenStatus,
-                'commands=/antigravity.usage /antigravity.models /antigravity.accounts /antigravity.doctor /antigravity.refresh /antigravity.image /antigravity.search',
+                'aiCreditOverages=' . (Credits::enabled() ? 'enabled' : 'disabled'),
+                'routing=' . Enterprise::describe(),
+                ...(WebFetch::lastTrace() !== null ? ['lastFetch=' . WebFetch::lastTrace()] : []),
+                'commands=/antigravity.usage /antigravity.models /antigravity.accounts /antigravity.credits /antigravity.doctor /antigravity.refresh /antigravity.image /antigravity.search /antigravity.fetch',
                 'tools=' . implode(', ', $activeTools),
             ]), 'info');
         },
         'Show sanitized Antigravity provider diagnostics',
+    );
+
+    $pig->registerCommand(
+        'antigravity.credits',
+        static function (string $args, ExtensionContext $ctx) use ($auth, $getAuthAndToken, $emit): void {
+            $mode = strtolower(trim($args));
+
+            try {
+                $turnOn = in_array($mode, ['on', 'enable', 'true', '1'], true);
+
+                if ($turnOn || in_array($mode, ['off', 'disable', 'false', '0'], true)) {
+                    // The session's own settings where there are some, so its next save keeps the
+                    // choice; the person's file read afresh where there are none.
+                    $settings = $auth->settings() ?? \Pig\CodingAgent\Settings::load($ctx->cwd);
+                    Credits::set($settings, $turnOn);
+                    $emit($ctx, $turnOn
+                        ? "Antigravity AI credit overages: ENABLED.\nRequests will supply enabledCreditTypes: ['GOOGLE_ONE_AI'] to use credit balance when standard quota is exhausted."
+                        : "Antigravity AI credit overages: DISABLED.\nRequests will not tap into AI credits.", 'info');
+
+                    return;
+                }
+
+                $lines = [];
+                $credits = null;
+                $authData = $getAuthAndToken();
+
+                if ($authData !== null) {
+                    [, $token, $projectId] = $authData;
+                    // `postJsonSafe()` underneath: an account whose balance cannot be read is shown
+                    // as reporting none, which is upstream's "best effort".
+                    $info = (new QuotaClient())->fetchRemainingCredits($token, $projectId);
+                    $credits = $info['availableCredits'];
+
+                    if ($info['planLabel'] !== null) {
+                        $lines[] = $info['planLabel'];
+                    }
+                }
+
+                foreach ($credits ?? [] as $credit) {
+                    // `toLocaleString()`: grouped thousands, up to three decimals.
+                    $lines[] = 'Remaining AI Credits: ' . rtrim(rtrim(number_format($credit['creditAmount'], 3), '0'), '.') . " ({$credit['creditType']})";
+                }
+
+                if ($credits === null) {
+                    $lines[] = 'Remaining AI Credits: 0 (or not reported by subscription)';
+                }
+
+                $lines[] = 'AI Credit Overages: ' . (Credits::enabled() ? 'ENABLED' : 'DISABLED');
+                $lines[] = '';
+                $lines[] = 'Usage:';
+                $lines[] = '  /antigravity.credits on   - Enable AI credits overage on quota exhaustion';
+                $lines[] = '  /antigravity.credits off  - Disable AI credits overage';
+                $emit($ctx, implode("\n", $lines), 'info');
+            } catch (Throwable $e) {
+                $emit($ctx, 'Failed to query or update credit settings: ' . AntigravityApi::redactSecrets($e->getMessage()), 'error');
+            }
+        },
+        'Check remaining AI credits or toggle overages (/antigravity.credits [on|off])',
     );
 
     $pig->registerCommand(
@@ -710,11 +783,134 @@ return function (ExtensionApi $pig): void {
         'Generate an image via Antigravity (usage: /antigravity.image [--ratio 16:9] <prompt>)',
     );
 
-    // ---- extra tools: google_search & generate_image -----------------------------------
+    $pig->registerCommand(
+        'antigravity.fetch',
+        static function (string $args, ExtensionContext $ctx) use ($getAuthAndToken, $emit): void {
+            $parsed = WebFetch::parseFetchCommandArgs($args);
+
+            if ($parsed['url'] === '') {
+                $emit($ctx, 'Usage: /antigravity.fetch [--raw] <url>', 'warning');
+
+                return;
+            }
+
+            if (!Document::available()) {
+                $emit($ctx, Document::MISSING_EXTENSION, 'warning');
+
+                return;
+            }
+
+            try {
+                $url = WebFetch::validateFetchTarget($parsed['url']);
+                $authData = $getAuthAndToken();
+
+                if ($authData === null) {
+                    $emit($ctx, 'No Antigravity credentials. Run /login antigravity first.', 'warning');
+
+                    return;
+                }
+
+                [, $token, $projectId] = $authData;
+
+                if ($ctx->hasUi) {
+                    $ctx->ui->notify('Reading page via Antigravity…', 'info');
+                }
+
+                $result = WebFetch::execute((string) json_encode(['token' => $token, 'projectId' => $projectId]), $url, $parsed['raw']);
+                $whole = $result['content'];
+                $footer = '';
+                $saved = null;
+
+                if (Text::length(WebFetch::formatHeader($result)) + Text::length($whole) > $result['maxChars']) {
+                    // "Raw output is the crawled source itself; converted output keeps its provenance."
+                    $saved = $parsed['raw']
+                        ? SavedPage::save($whole, Markdown::looksLikeHtml($whole) ? 'html' : 'txt')
+                        : SavedPage::save(WebFetch::formatHeader($result) . $whole, 'md');
+                    $footer = $saved->note(Text::length($whole), 'Open it to read the rest.');
+                }
+
+                try {
+                    $emit($ctx, WebFetch::formatResult($result, $footer), 'info');
+                } catch (Throwable $error) {
+                    // No answer names the file, so none is left behind.
+                    $saved?->discard();
+
+                    throw $error;
+                }
+            } catch (Throwable $caught) {
+                // A failed read is this command's answer, in words safe to show.
+                $message = $caught instanceof WebFetchError ? $caught->withSavedCopy() : $caught->getMessage();
+                $emit($ctx, Redaction::redactSecrets(str_replace(
+                    'Do not retry this URL with read_url_content. If permitted, use an available download tool or terminal to download it directly, then read the local file with a PDF reader.',
+                    'If you have permission, download the URL directly and open the local file with a PDF reader.',
+                    $message,
+                )), 'warning');
+            }
+        },
+        'Read a public web page via the Antigravity crawler (usage: /antigravity.fetch [--raw] <url>)',
+    );
+
+    // ---- extra tools: google_search, read_url_content & generate_image -----------------
 
     $noExtraTools = (getenv('ANTIGRAVITY_NO_EXTRA_TOOLS') ?: getenv('NOAGY_NO_EXTRA_TOOLS')) === '1';
     $noSearchTool = $noExtraTools || (getenv('ANTIGRAVITY_NO_SEARCH_TOOL') ?: getenv('NOAGY_NO_SEARCH_TOOL')) === '1';
     $noImageTool = $noExtraTools || (getenv('ANTIGRAVITY_NO_IMAGE_TOOL') ?: getenv('NOAGY_NO_IMAGE_TOOL')) === '1';
+    $noFetchTool = $noExtraTools || (getenv('ANTIGRAVITY_NO_FETCH_TOOL') ?: getenv('NOAGY_NO_FETCH_TOOL')) === '1';
+
+    if (!$noFetchTool) {
+        $pig->registerTool(new ToolDefinition(
+            name: 'read_url_content',
+            label: 'Read URL Content',
+            description: "Read a public web page through Google's Antigravity crawler and return it as markdown. Use it for documentation, articles, changelogs, and standards pages when search snippets are not enough. The crawl runs on Google's side: no JavaScript execution, no cookies, and no pages behind a login — for those, ask the user to open the page in their browser.",
+            parameters: [
+                'type' => 'object',
+                'properties' => [
+                    'url' => ['type' => 'string', 'description' => 'Public http(s) URL to fetch.'],
+                ],
+                'required' => ['url'],
+            ],
+            promptSnippet: 'Read a public web page as markdown via the Antigravity crawler',
+            promptGuidelines: [
+                'Use read_url_content when you have a specific URL whose contents you need, instead of guessing from a search result summary.',
+                'One URL per call, and prefer the page that holds the answer over a site root or a category index.',
+                'Long pages return their beginning and save the full page to a local file; read or search that file instead of fetching the URL again.',
+                'It cannot log in, run JavaScript, or read local and private addresses, so do not use it for those.',
+            ],
+            execute: static function (string $id, array $params, ?Closure $onUpdate, ExtensionContext $ctx, ?AbortSignal $signal) use ($getAuthAndToken): AgentToolResult {
+                try {
+                    if ($signal?->aborted() ?? false) {
+                        throw new RuntimeException('Web fetch aborted');
+                    }
+
+                    if (!Document::available()) {
+                        throw new RuntimeException(Document::MISSING_EXTENSION);
+                    }
+
+                    // "Unsafe caller URLs are rejected before credential lookup or progress."
+                    $url = WebFetch::validateFetchTarget(is_string($params['url'] ?? null) ? $params['url'] : '');
+                    $authData = $getAuthAndToken();
+
+                    if ($authData === null) {
+                        throw new RuntimeException('No Antigravity credentials. Run /login antigravity first.');
+                    }
+
+                    [, $token, $projectId] = $authData;
+
+                    if ($onUpdate !== null) {
+                        $onUpdate(new AgentToolResult([new TextContent('Reading ' . Redaction::redactSecrets($url) . '…')]));
+                    }
+
+                    [$text, $details] = ReadUrlContent::run((string) json_encode(['token' => $token, 'projectId' => $projectId]), $url, $signal);
+
+                    return new AgentToolResult([new TextContent($text)], $details);
+                } catch (Throwable $caught) {
+                    // "Error causes can retain request objects and response text; keep only a
+                    // redacted message."
+                    throw new RuntimeException(Redaction::redactSecrets($caught instanceof WebFetchError ? $caught->withSavedCopy() : $caught->getMessage()));
+                }
+            },
+        ));
+    }
 
     if (!$noSearchTool) {
         $pig->registerTool(new ToolDefinition(
@@ -759,18 +955,25 @@ return function (ExtensionApi $pig): void {
         $pig->registerTool(new ToolDefinition(
             name: 'generate_image',
             label: 'Generate image',
-            description: 'Generate an image via Antigravity using the signed-in Google account. Saves under .pig/generated-images/ unless path is set.',
+            description: 'Generate an image via Antigravity using the signed-in Google account, optionally guided by local reference images. Saves under .pig/generated-images/ unless path is set.',
             parameters: [
                 'type' => 'object',
                 'properties' => [
                     'prompt' => ['type' => 'string', 'description' => 'Image description.'],
                     'aspectRatio' => ['type' => 'string', 'enum' => ImageGenerator::ASPECT_RATIOS, 'description' => 'Aspect ratio for the generated image.'],
                     'model' => ['type' => 'string', 'description' => 'Image model id. Default: ' . ImageGenerator::DEFAULT_MODEL . '.'],
+                    'referenceImages' => [
+                        'type' => 'array',
+                        'items' => ['type' => 'string', 'description' => 'Project-relative reference image path (PNG, JPEG, WebP, or GIF).'],
+                        'description' => 'Reference images to send alongside the prompt.',
+                    ],
                     'path' => ['type' => 'string', 'description' => 'Project-relative file or directory to save the image.'],
                 ],
                 'required' => ['prompt'],
             ],
             execute: static function (string $id, array $params, ?Closure $onUpdate, ExtensionContext $ctx, ?AbortSignal $signal) use ($generateAndSave): AgentToolResult {
+                $references = ImageGenerator::referenceImages(is_array($params['referenceImages'] ?? null) ? array_values($params['referenceImages']) : [], $ctx->cwd);
+
                 if ($onUpdate !== null) {
                     $onUpdate(new AgentToolResult([new TextContent('Generating image…')]));
                 }
@@ -782,6 +985,7 @@ return function (ExtensionApi $pig): void {
                     isset($params['path']) && is_string($params['path']) ? $params['path'] : null,
                     $ctx->cwd,
                     $signal,
+                    $references,
                 );
 
                 $notes = trim(implode(' ', array_map(static fn (TextContent $text): string => $text->text, array_values(array_filter($result->output, static fn ($block): bool => $block instanceof TextContent)))));

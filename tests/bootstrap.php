@@ -45,6 +45,16 @@ mkdir($home, 0o700, true);
 putenv("HOME={$home}");
 $_ENV['HOME'] = $_SERVER['HOME'] = $home;
 
+// What decides credits and enterprise routing is read from the environment first; the machine's
+// own must not decide a test.
+foreach (['USE_CREDITS', 'USE_G1_CREDITS', 'LOCATION', 'ENTERPRISE', 'ENTERPRISE_PROJECT', 'USER_TIER'] as $name) {
+    putenv("ANTIGRAVITY_{$name}");
+    putenv("NOAGY_{$name}");
+}
+
+putenv('USE_G1_CREDITS');
+putenv('GOOGLE_CLOUD_LOCATION');
+
 register_shutdown_function(static function () use ($home): void {
     exec('rm -rf ' . escapeshellarg($home));
 });

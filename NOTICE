@@ -9,3 +9,15 @@ follow that project file by file, and are kept in step with its releases.
 
 The streaming, the Gemini request shapes and the OAuth plumbing are pig's own
 (https://github.com/owner888/pig), MIT License.
+
+The web page reader (src/WebFetch) follows pi-antigravity's web-fetch. Where that
+uses libraries, this package carries its own PHP for what they do, written
+against their behaviour:
+  - Turndown (https://github.com/mixmark-io/turndown), Copyright (c) 2017 Dom
+    Christie, MIT License, with its collapse-whitespace (Copyright (c) 2014
+    Luc Thevenard, MIT License);
+  - turndown-plugin-gfm (https://github.com/mixmark-io/turndown-plugin-gfm),
+    Copyright (c) 2017 Dom Christie, MIT License.
+
+tests/fixtures/web-fetch holds pi-antigravity's saved copies of public web
+pages, used only to test the reader; each page belongs to its publisher.

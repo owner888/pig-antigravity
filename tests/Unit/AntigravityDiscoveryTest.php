@@ -281,7 +281,7 @@ final class AntigravityDiscoveryTest extends TestCase
         $this->assertSame(hash('sha256', '["1//refresh","proj-1"]'), Discovery::credentialKey(self::key(), '1//refresh'));
 
         // The version the deployment gates its newest models on.
-        $this->assertStringContainsStringIgnoringCase('User-Agent: antigravity/cli/1.4.0 (aidev_client; ', $server->receivedHead());
+        $this->assertStringContainsStringIgnoringCase('User-Agent: antigravity/cli/1.5.5 (aidev_client; ', $server->receivedHead());
     }
 
     public function testTheModelsTheAnswersPickerListsAreTheCatalog(): void
@@ -444,9 +444,57 @@ final class AntigravityDiscoveryTest extends TestCase
         $this->assertSame(['x' => ['model' => 'two'], 'y' => [], 'z' => []], $merged['data']['models']);
         $this->assertSame('x', $merged['data']['defaultAgentModelId']);
         $this->assertSame([['groups' => []]], $merged['data']['agentModelSorts']);
+        $this->assertArrayNotHasKey('agentModelSorts', Discovery::mergeAvailableModelsResults([['endpoint' => 'b', 'status' => 200, 'data' => ['models' => ['x' => []]]]])['data']);
 
         $this->expectExceptionMessage('/v1internal:fetchAvailableModels failed: no endpoint returned a valid non-empty catalog');
         Discovery::mergeAvailableModelsResults([null, ['endpoint' => 'c', 'status' => 200, 'data' => ['models' => []]]]);
+    }
+
+    public function testThePickersListsOfEveryEndpointAreJoinedNotOverwritten(): void
+    {
+        // pi-antigravity 0.13 (#123): a model that launches on the daily endpoint before production
+        // (Gemini 4 Carbon) was in the merged models and not in the picker's list, because the last
+        // endpoint's list replaced the others'. Sorts match by name, groups by position, and the
+        // first endpoint's order stands.
+        $merged = Discovery::mergeAvailableModelsResults([
+            ['endpoint' => 'daily', 'status' => 200, 'data' => ['models' => ['a' => []], 'agentModelSorts' => [
+                ['displayName' => 'Recommended', 'groups' => [['modelIds' => ['gemini-4-carbon-low', 'gemini-4-argon-low']], ['modelIds' => ['claude-opus-5-5-low']]]],
+            ]]],
+            ['endpoint' => 'prod', 'status' => 200, 'data' => ['models' => ['b' => []], 'agentModelSorts' => [
+                ['displayName' => 'Recommended', 'groups' => [['modelIds' => ['gemini-4-argon-low', 'gemini-3.8-flash-low', '', 7]], [], ['modelIds' => ['gpt-oss-120b-medium']]]],
+                ['groups' => [['modelIds' => ['claude-opus-5-5-low', 'gemini-2.5-pro']]]],
+                'not a sort',
+            ]]],
+        ]);
+
+        $this->assertSame([
+            ['displayName' => 'Recommended', 'groups' => [
+                ['modelIds' => ['gemini-4-carbon-low', 'gemini-4-argon-low', 'gemini-3.8-flash-low']],
+                ['modelIds' => ['claude-opus-5-5-low']],
+                ['modelIds' => ['gpt-oss-120b-medium']],
+            ]],
+            // An id is listed once, where it was first seen.
+            ['groups' => [['modelIds' => ['gemini-2.5-pro']]]],
+        ], $merged['data']['agentModelSorts']);
+    }
+
+    public function testADiscoveredModelCarriesItsOwnListPriceBeforeItsFamilys(): void
+    {
+        // pi-antigravity 0.13 (#103): "so a newly discovered Flash variant is not billed at another
+        // Flash's rate"; one with no price of its own keeps the family template's.
+        $catalog = Grouping::buildAntigravityCatalog([
+            'gemini-2.5-flash-lite' => ['displayName' => 'Gemini 2.5 Flash Lite'],
+            'gemini-3.7-flash-low' => ['displayName' => 'Gemini 3.7 Flash (Low)'],
+            'gemini-3.9-flash-low' => ['displayName' => 'Gemini 3.9 Flash (Low)'],
+        ], Discovery::fallbackCatalog());
+        $byId = array_column($catalog['models'], null, 'id');
+
+        $this->assertSame(['input' => 0.1, 'output' => 0.4, 'cacheRead' => 0.01, 'cacheWrite' => 0.1], $byId['gemini-2.5-flash-lite']['cost']);
+        $this->assertSame(['input' => 0.75, 'output' => 3.75, 'cacheRead' => 0.075, 'cacheWrite' => 0.75], $byId['gemini-3.7-flash']['cost']);
+        $this->assertNull(\PigAntigravity\Models::cost('gemini-3.9-flash'));
+        $this->assertNull(\PigAntigravity\Models::cost('totally-unknown-model'));
+        $this->assertSame(['input' => 1.5, 'output' => 9.0, 'cacheRead' => 0.15, 'cacheWrite' => 1.5], \PigAntigravity\Models::cost('gemini-3.5-flash'));
+        $this->assertSame(['input' => 5.0, 'output' => 25.0, 'cacheRead' => 0.5, 'cacheWrite' => 6.25], \PigAntigravity\Models::cost('claude-opus-5-5'));
     }
 
     public function testTheIntervalTheEndpointAndTheKeyAreReadAsUpstreamReadsThem(): void

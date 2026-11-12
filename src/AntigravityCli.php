@@ -10,7 +10,7 @@ namespace PigAntigravity;
  *
  * The Code Assist deployment behind Antigravity reads the `User-Agent` and acts on it — a request
  * that does not name the CLI is refused, and the **version** in it decides which models the
- * catalogue shows and serves: 1.2.4 was not shown Gemini 4 Argon, 1.4.0 is. So the string is one
+ * catalogue shows and serves: 1.2.4 was not shown Gemini 4 Argon, 1.4.0 and later are. So the string is one
  * fact, kept in one place because it is read from several — this package's chat, quota, image,
  * search and catalogue requests, `scripts/fetch-antigravity-models.php`, and the `pig-gemini-video`
  * package's Antigravity path, which asks this class — and a copy left on an older version is a
@@ -22,7 +22,7 @@ namespace PigAntigravity;
 final class AntigravityCli
 {
     /** The CLI release requests say they are. */
-    public const string VERSION = '1.4.0';
+    public const string VERSION = '1.5.5';
 
     /** The build's changelist, which the CLI sends beside its version. */
     public const string CHANGELIST = '982146307';

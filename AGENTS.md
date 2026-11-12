@@ -10,8 +10,16 @@ this says how it is worked on. Keep this file under 100 lines.
   is `models/discovery.ts` plus the catalog half of `client/client.ts`, `Routing` is
   `models/models.ts`, `AntigravityApi` is the request loop and error wording of
   `stream/stream.ts`, `Accounts` is `auth/accounts.ts`, `GoogleSearch` is `search/search.ts`,
-  `ImageGenerator` is `image/image.ts`, `QuotaClient` is `usage/usage.ts`. A difference from
-  upstream is a bug unless the code's own comment records it as the developer's choice.
+  `ImageGenerator` is `image/image.ts`, `QuotaClient` is `usage/usage.ts`, `Credits` is
+  `utils/credits.ts`, `Enterprise` is `client/enterprise.ts`, `Redaction` is
+  `utils/security.ts`, `WebFetch/` is `web-fetch/` (`PublicUrl` is `utils/address.ts`, `Text` is
+  `utils/text.ts`). A difference from upstream is a bug unless the code's own comment records it
+  as the developer's choice.
+- **Where upstream leans on a library, `WebFetch/` has its own class held to it by tests**: `Url`
+  for the WHATWG URL, `Turndown` for turndown and its GFM tables, `Document` for the DOM (PHP's
+  `dom` extension, the one thing the reader needs; without it the tool says how to install it).
+  Lengths are counted in characters, not UTF-16 units. `tests/fixtures/web-fetch/` are
+  upstream's saved pages and must read as upstream reads them.
 - **When pi-antigravity releases**: read its `CHANGELOG.md` and the diff since the release this
   port is in step with (named at the top of `README.md`), port it, and move that name. The
   package's version follows upstream's.
@@ -35,6 +43,12 @@ this says how it is worked on. Keep this file under 100 lines.
   class per file.
 - The OAuth client id and secret are never in this repository.
 - The developer's name does not appear in this repository; write "the developer".
+- **Spending is opt-in**: `Credits` reads the person's own settings file, never the session's
+  merged settings, so a project cannot switch AI credit overages on.
+- **The reader asks Google's crawler and nothing else**: `read_url_content` never opens a
+  connection to the page's own host, and `PublicUrl::check()` runs before any request.
+- **Enterprise routing never falls back**: with `Enterprise::resolve()` answering a target, the
+  consumer endpoints are not asked, and an incomplete configuration throws before any request.
 - No composer dependencies. A git-installed package is not run through Composer, so
   `extensions/pig-antigravity.php` registers the autoloader itself. The entry keeps that file
   name: pig names an extension by its file, and settings written when it was bundled reach it.

@@ -191,18 +191,26 @@ final class AntigravityExtensionTest extends TestCase
 
         $this->assertNotNull($ext);
 
-        // Check tool registration: both google_search and generate_image are registered by default
+        // Check tool registration: google_search, read_url_content and generate_image are registered by default
         $tools = $ext->api->tools();
-        $this->assertCount(2, $tools);
+        $this->assertCount(3, $tools);
         $toolNames = array_map(static fn ($t): string => $t->name, $tools);
         $this->assertContains('google_search', $toolNames);
         $this->assertContains('generate_image', $toolNames);
+        $this->assertContains('read_url_content', $toolNames);
+
+        $fetchTool = $tools[array_search('read_url_content', $toolNames, true)];
+        $this->assertSame(['url'], array_keys($fetchTool->parameters['properties']));
+        $this->assertSame(['url'], $fetchTool->parameters['required']);
+        $this->assertStringContainsString('no JavaScript execution', $fetchTool->description);
+        $this->assertNotSame([], preg_grep('/local file/', $fetchTool->promptGuidelines));
 
         $imageTool = $tools[array_search('generate_image', $toolNames, true)];
         $this->assertSame('generate_image', $imageTool->name);
         $this->assertSame('Generate image', $imageTool->label);
         $this->assertArrayHasKey('prompt', $imageTool->parameters['properties']);
         $this->assertArrayHasKey('aspectRatio', $imageTool->parameters['properties']);
+        $this->assertSame('array', $imageTool->parameters['properties']['referenceImages']['type']);
         $this->assertContains('prompt', $imageTool->parameters['required']);
 
         $searchTool = $tools[array_search('google_search', $toolNames, true)];
@@ -223,6 +231,89 @@ final class AntigravityExtensionTest extends TestCase
         $this->assertArrayHasKey('antigravity.refresh', $registeredCommands);
         $this->assertArrayHasKey('antigravity.image', $registeredCommands);
         $this->assertArrayHasKey('antigravity.search', $registeredCommands);
+        $this->assertArrayHasKey('antigravity.credits', $registeredCommands);
+        $this->assertArrayHasKey('antigravity.fetch', $registeredCommands);
+    }
+
+    public function testTheFetchToolIsLeftOutWhenTheEnvironmentSaysSo(): void
+    {
+        foreach (['ANTIGRAVITY_NO_FETCH_TOOL' => ['google_search', 'generate_image'], 'ANTIGRAVITY_NO_EXTRA_TOOLS' => []] as $variable => $left) {
+            putenv("{$variable}=1");
+
+            try {
+                [$loaded] = $this->loadTheExtension();
+                $names = array_map(static fn ($tool): string => $tool->name, $loaded[0]->api->tools());
+                sort($names);
+                sort($left);
+                $this->assertSame($left, $names, $variable);
+            } finally {
+                putenv($variable);
+                \Pig\Ai\Extension\ProviderRegistry::forget();
+                \Pig\CodingAgent\Extensions\ExtensionApi::forgetHttpRoutes();
+                \Pig\CodingAgent\Extensions\ExtensionApi::forgetWebPanels();
+            }
+        }
+    }
+
+    public function testTheFetchCommandRefusesAnUnsafeAddressAndSaysHowItIsUsed(): void
+    {
+        putenv("PIG_CODING_AGENT_DIR={$this->home}");
+        putenv("PI_HOME={$this->home}");
+
+        try {
+            [$loaded] = $this->loadTheExtension();
+            $ext = $loaded[0];
+            [$commands] = (new \Pig\CodingAgent\Extensions\ExtensionRunner([new \Pig\CodingAgent\Extensions\LoadedExtension($ext->path, $ext->resolved, $ext->name, $ext->api)], $this->home))->commands();
+            $ui = new \Pig\CodingAgent\Test\Extensions\NoticingUi();
+            $ctx = new \Pig\CodingAgent\Extensions\ExtensionContext('.', ui: $ui, hasUi: true);
+
+            ($commands['antigravity.fetch']->handler)('  ', $ctx);
+            ($commands['antigravity.fetch']->handler)('--raw http://localhost/admin', $ctx);
+            ($commands['antigravity.fetch']->handler)('https://example.com/page', $ctx);
+
+            $this->assertSame([
+                '[warning] Usage: /antigravity.fetch [--raw] <url>',
+                '[warning] That URL is a private or local address, which the fetch service cannot reach.',
+                '[warning] No Antigravity credentials. Run /login antigravity first.',
+            ], $ui->notices);
+        } finally {
+            putenv('PIG_CODING_AGENT_DIR');
+            putenv('PI_HOME');
+        }
+    }
+
+    public function testTheCreditsCommandTurnsOveragesOnAndOffAndSaysWhereTheyStand(): void
+    {
+        putenv("PIG_CODING_AGENT_DIR={$this->home}");
+        putenv("PI_HOME={$this->home}");
+
+        try {
+            [$loaded] = $this->loadTheExtension();
+            $ext = $loaded[0];
+            [$commands] = (new \Pig\CodingAgent\Extensions\ExtensionRunner([new \Pig\CodingAgent\Extensions\LoadedExtension($ext->path, $ext->resolved, $ext->name, $ext->api)], $this->home))->commands();
+            $ui = new \Pig\CodingAgent\Test\Extensions\NoticingUi();
+            $ctx = new \Pig\CodingAgent\Extensions\ExtensionContext('.', ui: $ui, hasUi: true);
+
+            // Not signed in: no balance to ask for, and overages off until turned on.
+            ($commands['antigravity.credits']->handler)('', $ctx);
+            $this->assertSame("[info] Remaining AI Credits: 0 (or not reported by subscription)\nAI Credit Overages: DISABLED\n\nUsage:\n  /antigravity.credits on   - Enable AI credits overage on quota exhaustion\n  /antigravity.credits off  - Disable AI credits overage", $ui->notices[0]);
+
+            ($commands['antigravity.credits']->handler)(' ON ', $ctx);
+            $this->assertSame("[info] Antigravity AI credit overages: ENABLED.\nRequests will supply enabledCreditTypes: ['GOOGLE_ONE_AI'] to use credit balance when standard quota is exhausted.", $ui->notices[1]);
+            $this->assertTrue(json_decode((string) file_get_contents("{$this->home}/settings.json"), true)['useG1Credits']);
+            $this->assertTrue(\PigAntigravity\Credits::enabled());
+
+            ($commands['antigravity.doctor']->handler)('', $ctx);
+            $this->assertStringContainsString("\naiCreditOverages=enabled\nrouting=consumer\n", $ui->notices[2]);
+
+            ($commands['antigravity.credits']->handler)('off', $ctx);
+            $this->assertSame("[info] Antigravity AI credit overages: DISABLED.\nRequests will not tap into AI credits.", $ui->notices[3]);
+            $this->assertFalse(\PigAntigravity\Credits::enabled());
+        } finally {
+            putenv('PIG_CODING_AGENT_DIR');
+            putenv('PI_HOME');
+            exec('rm -f ' . escapeshellarg("{$this->home}/settings.json"));
+        }
     }
 
     public function testRefreshingTheCatalogWithoutAnAccountSaysToSignInFirst(): void

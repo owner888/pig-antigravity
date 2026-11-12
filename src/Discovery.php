@@ -303,7 +303,7 @@ final class Discovery
         $mergedModels = [];
         $defaultAgentModelId = null;
         $defaultAgentModel = null;
-        $agentModelSorts = null;
+        $agentModelSortsSources = [];
         $lastEndpoint = '';
         $lastStatus = 0;
 
@@ -327,13 +327,15 @@ final class Discovery
             }
 
             if (is_array($data['agentModelSorts'] ?? null) && array_is_list($data['agentModelSorts'])) {
-                $agentModelSorts = $data['agentModelSorts'];
+                $agentModelSortsSources[] = $data['agentModelSorts'];
             }
         }
 
         if ($lastEndpoint === '') {
             throw new RuntimeException('/v1internal:fetchAvailableModels failed: no endpoint returned a valid non-empty catalog', 0, $lastError);
         }
+
+        $agentModelSorts = self::mergeAgentModelSorts($agentModelSortsSources);
 
         return [
             'endpoint' => $lastEndpoint,
@@ -345,6 +347,70 @@ final class Discovery
                 ...($agentModelSorts !== null ? ['agentModelSorts' => $agentModelSorts] : []),
             ],
         ];
+    }
+
+    /**
+     * pi-antigravity 0.13's `mergeAgentModelSorts()`: "Union the curated `agentModelSorts`
+     * recommendation lists from every endpoint. New models roll out on the daily/sandbox endpoints
+     * before production (e.g. Gemini 4 Carbon); a last-endpoint-wins merge lets the production list
+     * hide models the other endpoints already recommend, while the merged `models` dictionary above
+     * is a union. Sorts are matched by `displayName` and groups by position; first-seen order wins
+     * so the primary endpoint keeps its ranking."
+     *
+     * @param list<list<mixed>> $sources
+     * @return list<array{displayName?: string, groups: list<array{modelIds: list<string>}>}>|null
+     */
+    private static function mergeAgentModelSorts(array $sources): ?array
+    {
+        $seen = [];
+        $merged = [];
+
+        foreach ($sources as $sorts) {
+            foreach ($sorts as $sort) {
+                if (!is_array($sort) || ($sort !== [] && array_is_list($sort))) {
+                    continue;
+                }
+
+                $displayName = is_string($sort['displayName'] ?? null) ? $sort['displayName'] : null;
+                $target = null;
+
+                foreach ($merged as $index => $entry) {
+                    if (($entry['displayName'] ?? null) === $displayName) {
+                        $target = $index;
+
+                        break;
+                    }
+                }
+
+                if ($target === null) {
+                    $merged[] = [...($displayName !== null ? ['displayName' => $displayName] : []), 'groups' => []];
+                    $target = array_key_last($merged);
+                }
+
+                $groups = is_array($sort['groups'] ?? null) && array_is_list($sort['groups']) ? $sort['groups'] : [];
+
+                foreach ($groups as $position => $group) {
+                    // A JavaScript array assigned past its end has holes before the index; here the
+                    // groups before it exist, empty.
+                    for ($fill = count($merged[$target]['groups']); $fill <= $position; $fill++) {
+                        $merged[$target]['groups'][$fill] = ['modelIds' => []];
+                    }
+
+                    $modelIds = is_array($group) && is_array($group['modelIds'] ?? null) && array_is_list($group['modelIds']) ? $group['modelIds'] : [];
+
+                    foreach ($modelIds as $id) {
+                        if (!is_string($id) || $id === '' || isset($seen[$id])) {
+                            continue;
+                        }
+
+                        $seen[$id] = true;
+                        $merged[$target]['groups'][$position]['modelIds'][] = $id;
+                    }
+                }
+            }
+        }
+
+        return $merged === [] ? null : $merged;
     }
 
     /** A non-empty object whose every value is an object — as `json_decode` hands objects over. */

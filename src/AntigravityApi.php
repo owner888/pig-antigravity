@@ -350,6 +350,15 @@ final class AntigravityApi implements StreamApi
         $second = $this->fallback ?? ($primary === self::ENDPOINT ? self::FALLBACK_ENDPOINT : null);
         $hosts = $second === null || $second === $primary ? [$primary] : [$primary, $second];
 
+        // pi-antigravity 0.13: a Gemini Enterprise license goes to its location's own host and to
+        // no other — never on to the consumer endpoints, which refuse it and are outside its region.
+        $enterprise = Enterprise::resolve();
+
+        if ($enterprise !== null) {
+            $primary = $enterprise->host;
+            $hosts = [$enterprise->host];
+        }
+
         // Both, so that the two cannot contradict each other: `thinkingEnabled: false` with a level
         // set means off, which is the reading every other provider here gives it.
         $level = ($options?->thinkingEnabled ?? false) ? $options?->thinkingLevel : null;
@@ -384,10 +393,20 @@ final class AntigravityApi implements StreamApi
                 foreach ($hosts as $host) {
                     $lastHost = $host;
                     $nonce = self::nextRequestNonce($turnKey);
-                    $body = $this->encode($this->body($model, $context, $options, $project, $runtime, $nonce === 0 ? null : self::retrySessionSeed($sessionId, $nonce)));
+                    $payload = $this->body($model, $context, $options, $enterprise?->projectId ?? $project, $runtime, $nonce === 0 ? null : self::retrySessionSeed($sessionId, $nonce));
+
+                    if ($enterprise !== null) {
+                        $payload = $enterprise->generateBody($payload);
+                    }
+
+                    // pi-antigravity 0.13 (#126): `onPayload` sees the request as it is about to
+                    // go, and what it answers goes instead.
+                    $rewritten = $options?->onPayload !== null ? ($options->onPayload)($payload, $model) : null;
+                    $body = $this->encode(is_array($rewritten) ? $rewritten : $payload);
+                    $url = $enterprise?->streamUrl() ?? rtrim($host, '/') . '/v1internal:streamGenerateContent?alt=sse';
 
                     try {
-                        $last = $this->http->send($this->request($host, $token, $model, $body), $signal);
+                        $last = $this->http->send($this->request($url, $token, $model, $body, $enterprise !== null), $signal);
                     } catch (Throwable $error) {
                         // "Caller cancellation is not an endpoint failure — propagate it. A transport
                         // failure or our own header deadline abort means this endpoint may be wedged;
@@ -572,28 +591,32 @@ final class AntigravityApi implements StreamApi
 
     /**
      * pi-antigravity's quota-wall test on a 429's text: "Individual quota reached", a "Resets in …"
-     * hint, or quota wording that is not about rate limiting. Public for `ImageGenerator`, whose
+     * hint, an AI credits balance that has run out, or quota wording that is not about rate limiting. Public for `ImageGenerator`, whose
      * request loop fails over on the same wall.
      */
     public static function isQuotaWall(string $text): bool
     {
         return preg_match('/Individual quota reached/i', $text) === 1
             || preg_match('/Resets? in /i', $text) === 1
+            || preg_match('/AI credits balance is too low|INSUFFICIENT_G1_CREDITS/i', $text) === 1
             || (preg_match('/rate.?limit/i', $text) !== 1 && preg_match('/quota exceeded|exceeded your|daily limit/i', $text) === 1);
     }
 
-    private function request(string $host, string $token, Model $model, string $body): Request
+    private function request(string $url, string $token, Model $model, string $body, bool $enterprise = false): Request
     {
+        $userAgent = AntigravityCli::userAgent();
+
         return new Request(
             'POST',
-            rtrim($host, '/') . '/v1internal:streamGenerateContent?alt=sse',
+            $url,
             [
                 'accept' => 'text/event-stream',
                 'content-type' => 'application/json',
                 'authorization' => "Bearer {$token}",
                 // The CLI's own, which this deployment checks: a version and a platform that have
                 // nothing to do with the machine running pig. pig's core holds it (`AntigravityCli`).
-                'user-agent' => AntigravityCli::userAgent(),
+                // An enterprise license signs in as a Cloud identity, and says so.
+                'user-agent' => $enterprise ? str_replace('auth_method=consumer', 'auth_method=gcp', $userAgent) : $userAgent,
                 ...$model->headers,
             ],
             $body,
@@ -700,6 +723,8 @@ final class AntigravityApi implements StreamApi
                 $trajectory,
                 max(1, $steps),
             ),
+            // Only when the person turned overages on: this is what lets a request spend them.
+            ...(Credits::enabled() ? ['enabledCreditTypes' => Credits::CREDIT_TYPES] : []),
         ];
     }
 
@@ -781,13 +806,16 @@ final class AntigravityApi implements StreamApi
      *
      * @return array{0: string, 1: string}
      */
-    private static function credentials(?string $apiKey): array
+    public static function credentials(?string $apiKey): array
     {
         $decoded = $apiKey === null || $apiKey === '' ? null : json_decode($apiKey, true);
         $token = is_array($decoded) ? ($decoded['token'] ?? null) : null;
         $project = is_array($decoded) ? ($decoded['projectId'] ?? null) : null;
 
-        if (!is_string($token) || $token === '' || !is_string($project) || $project === '') {
+        // pi-antigravity 0.13: printable ASCII only, so neither can carry a line break into a header.
+        $printable = static fn (mixed $value): bool => is_string($value) && preg_match('/^[\x21-\x7e]+$/D', $value) === 1;
+
+        if (!$printable($token) || !$printable($project)) {
             throw new ProviderError(
                 'Antigravity needs a token and a Cloud project together, which is what signing in '
                 . 'stores. An ordinary Gemini API key cannot be used with antigravity models.',
@@ -824,7 +852,8 @@ final class AntigravityApi implements StreamApi
     {
         $decoded = json_decode($text, true);
         $message = is_array($decoded) && is_array($decoded['error'] ?? null) ? ($decoded['error']['message'] ?? null) : null;
-        $msg = mb_substr(self::redactSecrets(is_string($message) && $message !== '' ? $message : $text), 0, 500, 'UTF-8');
+        // `typeof parsed.error?.message === "string"`: an empty message is the message.
+        $msg = mb_substr(self::redactSecrets(is_string($message) ? $message : $text), 0, 500, 'UTF-8');
 
         if ($status === 400) {
             if (preg_match('/Requests ending with a model turn are not supported/i', $msg) === 1) {
@@ -860,6 +889,10 @@ final class AntigravityApi implements StreamApi
                 ? " Open this link in a browser signed in to the same Google account to verify: {$verifyUrl}"
                 : '';
 
+            if (preg_match('/#3501|do not have a valid license of this product/i', $msg) === 1) {
+                return "This account's Gemini Enterprise license was not accepted on the consumer endpoint. Next: set ANTIGRAVITY_LOCATION to eu, us, or global, plus ANTIGRAVITY_ENTERPRISE_PROJECT and ANTIGRAVITY_USER_TIER from the license selector, then retry. A regional location is not sent to cloudcode-pa.";
+            }
+
             if (preg_match('/permission|forbidden|access/i', $msg) === 1 && $verifyUrl === null) {
                 return 'Antigravity access was denied for this account or project. Next: try another model, re-login, or use an account with access.';
             }
@@ -884,10 +917,17 @@ final class AntigravityApi implements StreamApi
         }
 
         if ($status === 429) {
+            if (preg_match('/AI credits balance is too low|INSUFFICIENT_G1_CREDITS/i', $msg) === 1) {
+                return 'Your AI credits balance is exhausted. Please refill credits in Google One or wait for your regular quota to reset. Next: switch models or retry later.';
+            }
+
             $wait = preg_match('/Resets? in ([^.\n]+)/i', $msg, $match) === 1 ? trim($match[1]) : '';
+            $hint = Credits::enabled()
+                ? ' (AI credits overage active; credit balance may be depleted)'
+                : ' (Enable AI credits fallback with /antigravity.credits on)';
 
             if (preg_match('/Individual quota reached/i', $msg) === 1) {
-                return 'Quota reached. Please wait ' . ($wait !== '' ? $wait : 'for reset') . '. Next: switch models or try again after reset.';
+                return 'Quota reached. Please wait ' . ($wait !== '' ? $wait : 'for reset') . ".{$hint} Next: switch models or try again after reset.";
             }
 
             $hardLimit = $wait !== ''
@@ -895,7 +935,7 @@ final class AntigravityApi implements StreamApi
                     && preg_match('/quota exceeded|exceeded your|limit reached|reached your|daily limit/i', $msg) === 1);
 
             if ($hardLimit) {
-                return 'Quota reached.' . ($wait !== '' ? " Please wait {$wait}." : '') . ' Next: switch models or retry later.';
+                return 'Quota reached.' . ($wait !== '' ? " Please wait {$wait}." : '') . "{$hint} Next: switch models or retry later.";
             }
 
             if (self::isRetryableRateLimit($msg)) {
@@ -959,25 +999,9 @@ final class AntigravityApi implements StreamApi
         return null;
     }
 
-    /** pi-antigravity's `redactSecrets()`. Public for `Discovery`, which words its errors the same way. */
+    /** pi-antigravity's `redactSecrets()` — `Redaction`'s, kept here for the callers that ask this class. */
     public static function redactSecrets(string $text): string
     {
-        return (string) preg_replace(
-            [
-                '/\bya29\.[A-Za-z0-9._~+\/-]+=*/',
-                '/\b1\/[A-Za-z0-9_-]{20,}/',
-                '/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/i',
-                '/("?(?:access_token|refresh_token|id_token|token|client_secret|code_verifier|authorization)"?\s*[:=]\s*")[^"]*(")/i',
-                '/("?(?:access_token|refresh_token|id_token|token|client_secret|code_verifier|authorization)"?\s*[:=]\s*)[^\s&,}]+/i',
-            ],
-            [
-                '[redacted-access-token]',
-                '[redacted-refresh-token]',
-                'Bearer [redacted]',
-                '$1[redacted]$2',
-                '$1[redacted]',
-            ],
-            $text,
-        );
+        return Redaction::redactSecrets($text);
     }
 }

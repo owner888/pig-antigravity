@@ -19,7 +19,7 @@ final class AntigravityCliTest extends TestCase
     public function testTheUserAgentIsTheClisOwnWithTheVersionTheCatalogueIsGatedOn(): void
     {
         // pi-antigravity's `DEFAULT_USER_AGENT`, character for character.
-        $this->assertSame('antigravity/cli/1.4.0 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)', AntigravityCli::userAgent());
+        $this->assertSame('antigravity/cli/1.5.5 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)', AntigravityCli::userAgent());
         $this->assertSame(AntigravityCli::defaultUserAgent(), AntigravityCli::userAgent());
         $this->assertStringContainsString('/' . AntigravityCli::VERSION . ' ', AntigravityCli::userAgent());
     }

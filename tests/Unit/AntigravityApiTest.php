@@ -327,7 +327,7 @@ final class AntigravityApiTest extends TestCase
 
         $message = $this->drain(new Antigravity(fallback: $secondUrl), $this->model($url), 'gemini-3-flash', 'low', new Context([new UserMessage('hi')]));
 
-        $this->assertSame('Quota reached. Please wait 2h3m. Next: switch models or try again after reset.', $message);
+        $this->assertSame('Quota reached. Please wait 2h3m. (Enable AI credits fallback with /antigravity.credits on) Next: switch models or try again after reset.', $message);
         $this->assertSame('', $second->receivedHead(), 'the second host was never asked');
     }
 
@@ -437,6 +437,42 @@ final class AntigravityApiTest extends TestCase
 
         $this->assertSame(1, $this->server->connections());
         $this->assertStringStartsWith('Quota reached. Please wait 2h 10m.', $message);
+    }
+
+    public function testOnPayloadSeesTheRequestAboutToGoAndWhatItAnswersGoesInstead(): void
+    {
+        // pi-antigravity 0.13 (#126): `before_provider_request` reached every provider but this one.
+        $url = $this->serve([['response' => ['candidates' => [['content' => ['parts' => [['text' => 'ok']]], 'finishReason' => 'STOP']]]]]);
+        $seen = null;
+
+        $this->drain(new Antigravity(), $this->model($url), 'gemini-3-flash', 'low', new Context([new UserMessage('hi')]), onPayload: static function (mixed $payload) use (&$seen): array {
+            $seen = $payload;
+            $payload['request']['labels']['added'] = 'yes';
+
+            return $payload;
+        });
+
+        $this->assertSame('gemini-3-flash', $seen['model'] ?? null);
+        $this->assertSame('yes', $this->server->receivedJson()['request']['labels']['added']);
+
+        // Null is "as it was".
+        $again = new CannedServer();
+        $againUrl = $again->start($this->okPieces([['response' => ['candidates' => [['content' => ['parts' => [['text' => 'ok']]], 'finishReason' => 'STOP']]]]]));
+        $this->drain(new Antigravity(), $this->model($againUrl), 'gemini-3-flash', 'low', new Context([new UserMessage('hi')]), onPayload: static fn (): mixed => null);
+        $this->assertSame('gemini-3-flash', $again->receivedJson()['model']);
+    }
+
+    public function testATokenOrProjectThatIsNotPrintableIsNotSent(): void
+    {
+        // pi-antigravity 0.13: neither may carry a line break (or anything else unprintable) into a header.
+        $url = $this->serve([['response' => ['candidates' => [['content' => ['parts' => [['text' => 'ok']]], 'finishReason' => 'STOP']]]]]);
+
+        foreach ([self::key("ya29.a\r\nX-Injected: 1"), self::key('ya29.a', 'proj 1'), self::key('', 'proj-1')] as $key) {
+            $message = (string) $this->drain(new Antigravity(), $this->model($url), 'gemini-3-flash', 'low', new Context([new UserMessage('hi')]), $key);
+            $this->assertStringStartsWith('Antigravity needs a token and a Cloud project together', $message);
+        }
+
+        $this->assertSame(0, $this->server->connections());
     }
 
     public function testTheModelThatActuallyAnsweredIsOnTheMessage(): void
@@ -725,8 +761,8 @@ final class AntigravityApiTest extends TestCase
         foreach ($listed as $model) {
             $this->assertSame(Api::Extension, $model->api, $model->id);
             $this->assertSame(Antigravity::ENDPOINT, $model->baseUrl, $model->id);
-            // A subscription, so there is no per-token price to report.
-            $this->assertSame(0.0, $model->pricing->input, $model->id);
+            // The model's own list price where upstream publishes one (pi-antigravity 0.13).
+            $this->assertSame(\PigAntigravity\Models::cost($model->id)['input'] ?? 0.0, $model->pricing->input, $model->id);
             // Every one of them always thinks, which is the deployment's answer and not an
             // oversight — see the table's docblock.
             $this->assertFalse($model->hasThinkingLevel('off'), $model->id);
@@ -761,8 +797,9 @@ final class AntigravityApiTest extends TestCase
         Context $context,
         ?string $key = null,
         ?string $sessionId = null,
+        ?\Closure $onPayload = null,
     ): ?string {
-        return Async::run(function () use ($provider, $model, $id, $level, $context, $key, $sessionId): ?string {
+        return Async::run(function () use ($provider, $model, $id, $level, $context, $key, $sessionId, $onPayload): ?string {
             $stream = $provider->stream(
                 new Model(
                     $id,
@@ -783,6 +820,7 @@ final class AntigravityApiTest extends TestCase
                     thinkingEnabled: $level !== null,
                     thinkingLevel: $level,
                     sessionId: $sessionId,
+                    onPayload: $onPayload,
                 ),
             );
 

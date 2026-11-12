@@ -59,12 +59,12 @@ final class AntigravityCatalogTest extends TestCase
     public function testTheCatalogueWinsOverTheRowPigShipsForTheSameModel(): void
     {
         // The whole reason it is read: both tables are prints of the same endpoint, and this one
-        // was taken more recently. What it visibly costs to get this backwards is the price —
-        // pig's own rows carry `new Pricing()`, so a subscription turn reports as free.
+        // was taken more recently. The price shows which one is in use: pig's own row carries
+        // the model's list price, and the catalogue's is whatever it says.
         $shipped = Models::find('antigravity', 'gemini-3.8-flash');
 
         self::assertNotNull($shipped);
-        self::assertSame(0.0, $shipped->pricing->input);
+        self::assertSame(0.75, $shipped->pricing->input);
 
         $this->writeStore(['gemini-3.8-flash' => ['cost' => ['input' => 0.1, 'output' => 0.4]]]);
         Catalog::discover()->install();

@@ -413,6 +413,98 @@ final class QuotaClient
     }
 
     /**
+     * The account's AI credit balances — pi-antigravity 0.13's `fetchRemainingCredits()`, without
+     * its `overagesEnabled` (that is `Credits::status()`, which needs no request): the paid tier's
+     * `availableCredits`, else the current tier's, else the answer's own, and the plan's label.
+     *
+     * @return array{availableCredits: list<array{creditType: string, creditAmount: float, minimumCreditAmountForUsage: ?float}>|null, planLabel: ?string}
+     */
+    public function fetchRemainingCredits(string $token, ?string $projectId = null): array
+    {
+        $http = $this->http ?? new HttpClient(15.0);
+        $assistData = $this->postJsonSafe($http, $this->endpoint !== null ? [$this->endpoint] : self::ENDPOINTS, '/v1internal:loadCodeAssist', $token, $projectId, [
+            'metadata' => [
+                'ideType' => 'ANTIGRAVITY',
+                'platform' => 'PLATFORM_UNSPECIFIED',
+                'pluginType' => 'GEMINI',
+            ],
+        ]);
+        $assistData = is_array($assistData) ? $assistData : [];
+        $credits = null;
+        $planLabel = null;
+
+        foreach (['paidTier', 'currentTier'] as $key) {
+            $tier = $assistData[$key] ?? null;
+
+            // `parseTier()`: a tier with neither an id nor a name is no tier.
+            if (!is_array($tier) || (empty($tier['id']) && empty($tier['name']))) {
+                continue;
+            }
+
+            $credits ??= self::parseCredits($tier['availableCredits'] ?? $tier['available_credits'] ?? null);
+
+            if ($planLabel === null && !empty($tier['name']) && is_scalar($tier['name'])) {
+                $planLabel = $tier['name'] . (!empty($tier['id']) && is_scalar($tier['id']) ? " ({$tier['id']})" : '');
+            }
+        }
+
+        return [
+            'availableCredits' => $credits ?? self::parseCredits($assistData['availableCredits'] ?? $assistData['available_credits'] ?? null),
+            'planLabel' => $planLabel,
+        ];
+    }
+
+    /**
+     * pi-antigravity's `parseCredits()`: the entries with a finite amount, under either spelling
+     * of their keys; null when there is none.
+     *
+     * @return list<array{creditType: string, creditAmount: float, minimumCreditAmountForUsage: ?float}>|null
+     */
+    public static function parseCredits(mixed $list): ?array
+    {
+        if (!is_array($list) || !array_is_list($list)) {
+            return null;
+        }
+
+        // `typeof amt === "number" ? amt : typeof amt === "string" ? Number(amt) : undefined`.
+        $number = static function (mixed $value): ?float {
+            if (is_int($value) || is_float($value)) {
+                return (float) $value;
+            }
+
+            if (!is_string($value)) {
+                return null;
+            }
+
+            $trimmed = trim($value);
+
+            return $trimmed === '' ? 0.0 : (is_numeric($trimmed) ? (float) $trimmed : NAN);
+        };
+        $result = [];
+
+        foreach ($list as $item) {
+            if (!is_array($item) || array_is_list($item)) {
+                continue;
+            }
+
+            $amount = $number($item['creditAmount'] ?? $item['credit_amount'] ?? null);
+
+            if ($amount === null || !is_finite($amount)) {
+                continue;
+            }
+
+            $type = $item['creditType'] ?? $item['credit_type'] ?? null;
+            $result[] = [
+                'creditType' => is_string($type) ? $type : 'GOOGLE_ONE_AI',
+                'creditAmount' => $amount,
+                'minimumCreditAmountForUsage' => $number($item['minimumCreditAmountForUsage'] ?? $item['minimum_credit_amount_for_usage'] ?? null),
+            ];
+        }
+
+        return $result === [] ? null : $result;
+    }
+
+    /**
      * @param array<string, mixed> $assistData
      */
     private static function parsePlanLabel(array $assistData): ?string

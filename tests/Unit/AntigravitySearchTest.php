@@ -86,7 +86,7 @@ final class AntigravitySearchTest extends TestCase
         $this->assertSame(2, $server->connections());
         $this->assertStringContainsString('"model":"' . GoogleSearch::SEARCH_MODEL_FALLBACKS[0] . '"', $server->received());
         $this->assertStringContainsString('"model":"' . GoogleSearch::SEARCH_MODEL_FALLBACKS[1] . '"', $server->received());
-        $this->assertStringContainsStringIgnoringCase('user-agent: antigravity/cli/1.4.0 ', $server->receivedHead());
+        $this->assertStringContainsStringIgnoringCase('user-agent: antigravity/cli/1.5.5 ', $server->receivedHead());
 
         // A refusal of the account fails at once: neither the other endpoint nor another model.
         $denied = new CannedServer();

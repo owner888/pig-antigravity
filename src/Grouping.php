@@ -465,7 +465,9 @@ final class Grouping
         }
 
         $model['input'] = $supportsImages ? ['text', 'image'] : ['text'];
-        $model['cost'] = $template['cost'] ?? self::ZERO_COST;
+        // "Prefer this model's own published price over the family template's, so a newly
+        // discovered Flash variant is not billed at another Flash's rate."
+        $model['cost'] = Models::cost($group['publicId']) ?? $template['cost'] ?? self::ZERO_COST;
         $model['contextWindow'] = $group['contextWindow'] ?? $template['contextWindow'] ?? 128000;
         $model['maxTokens'] = $group['maxOutputTokens'] ?? $template['maxTokens'] ?? 8192;
 
