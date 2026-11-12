@@ -998,23 +998,34 @@ final class WebFetch
     }
 
     /**
-     * "Parse `/antigravity.fetch [--raw] <url>`."
+     * "Parse `/antigravity.fetch [--raw] <url>`", and this package's `--path <file>`.
      *
-     * @return array{url: string, raw: bool}
+     * @return array{url: string, raw: bool, path: ?string}
      */
     public static function parseFetchCommandArgs(string $args): array
     {
         $rest = [];
         $raw = false;
+        $path = null;
+        $tokens = preg_split('/\s+/', trim($args), -1, PREG_SPLIT_NO_EMPTY) ?: [];
 
-        foreach (preg_split('/\s+/', trim($args), -1, PREG_SPLIT_NO_EMPTY) ?: [] as $token) {
-            if ($token === '--raw') {
+        for ($index = 0; $index < count($tokens); $index++) {
+            if ($tokens[$index] === '--raw') {
                 $raw = true;
+            } elseif ($tokens[$index] === '--path') {
+                // The developer's addition, which upstream's command does not have: the whole page
+                // into a file of the working directory, as `/antigravity.image --path` writes its
+                // image. With no file after it there is nothing to read: the usage is shown.
+                if (!isset($tokens[$index + 1])) {
+                    return ['url' => '', 'raw' => $raw, 'path' => null];
+                }
+
+                $path = $tokens[++$index];
             } else {
-                $rest[] = $token;
+                $rest[] = $tokens[$index];
             }
         }
 
-        return ['url' => implode(' ', $rest), 'raw' => $raw];
+        return ['url' => implode(' ', $rest), 'raw' => $raw, 'path' => $path];
     }
 }

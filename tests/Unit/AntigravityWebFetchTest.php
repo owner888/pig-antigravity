@@ -505,8 +505,10 @@ final class AntigravityWebFetchTest extends TestCase
 
     public function testTheCommandsArgumentsAreAnAddressAndAFlag(): void
     {
-        $this->assertSame(['url' => 'https://example.com/a', 'raw' => true], WebFetch::parseFetchCommandArgs('  --raw   https://example.com/a '));
-        $this->assertSame(['url' => '', 'raw' => false], WebFetch::parseFetchCommandArgs(''));
+        $this->assertSame(['url' => 'https://example.com/a', 'raw' => true, 'path' => null], WebFetch::parseFetchCommandArgs('  --raw   https://example.com/a '));
+        $this->assertSame(['url' => '', 'raw' => false, 'path' => null], WebFetch::parseFetchCommandArgs(''));
+        $this->assertSame(['url' => 'https://example.com/a', 'raw' => false, 'path' => 'notes/a.md'], WebFetch::parseFetchCommandArgs('--path notes/a.md https://example.com/a'));
+        $this->assertSame(['url' => '', 'raw' => false, 'path' => null], WebFetch::parseFetchCommandArgs('https://example.com/a --path'), 'a --path with no file is the usage');
     }
 
     /** @return iterable<string, array{string, int, string}> */

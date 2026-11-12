@@ -272,7 +272,7 @@ final class AntigravityExtensionTest extends TestCase
             ($commands['antigravity.fetch']->handler)('https://example.com/page', $ctx);
 
             $this->assertSame([
-                '[warning] Usage: /antigravity.fetch [--raw] <url>',
+                '[warning] Usage: /antigravity.fetch [--raw] [--path <file>] <url>',
                 '[warning] That URL is a private or local address, which the fetch service cannot reach.',
                 '[warning] No Antigravity credentials. Run /login antigravity first.',
             ], $ui->notices);

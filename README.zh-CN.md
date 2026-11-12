@@ -53,7 +53,7 @@ pig --model antigravity/gemini-3.8-flash
 | `/antigravity.refresh` | 立即向后端询问模型目录 |
 | `/antigravity.credits [on\|off]` | 账号的 Google One AI 额度余额，以及限额池用完后请求是否可以动用它。默认关闭，由你打开；保存在 pig 的 `settings.json` 的 `useG1Credits` |
 | `/antigravity.search [--thinking] [--url <url>] <query>` | Google Search grounding |
-| `/antigravity.fetch [--raw] <url>` | 像 `read_url_content` 那样读取一个网页；`--raw` 显示爬虫返回的原文，不做转换 |
+| `/antigravity.fetch [--raw] [--path <file>] <url>` | 像 `read_url_content` 那样读取一个网页；`--raw` 显示爬虫返回的原文，不做转换；`--path` 把整页写到工作目录内的文件里，不在界面上显示 |
 | `/antigravity.image [--ratio <w:h>] [--model <id>] [--path <file>] <prompt>` | 生成图片 |
 | `/antigravity.doctor` | 去掉敏感信息的诊断输出 |
 

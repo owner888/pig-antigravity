@@ -789,7 +789,7 @@ return function (ExtensionApi $pig): void {
             $parsed = WebFetch::parseFetchCommandArgs($args);
 
             if ($parsed['url'] === '') {
-                $emit($ctx, 'Usage: /antigravity.fetch [--raw] <url>', 'warning');
+                $emit($ctx, 'Usage: /antigravity.fetch [--raw] [--path <file>] <url>', 'warning');
 
                 return;
             }
@@ -821,6 +821,20 @@ return function (ExtensionApi $pig): void {
                 $footer = '';
                 $saved = null;
 
+                if ($parsed['path'] !== null) {
+                    // The whole page where the person asked for it, and the answer only says so. The
+                    // file is written as an image is: inside the working directory, through no link.
+                    try {
+                        ImageGenerator::writeImage($parsed['path'], $parsed['raw'] ? $whole : WebFetch::formatHeader($result) . $whole, $ctx->cwd);
+                    } catch (RuntimeException $error) {
+                        throw new RuntimeException(str_replace(['Image path', 'the image'], ['The --path file', 'the page'], $error->getMessage()), previous: $error);
+                    }
+
+                    $emit($ctx, WebFetch::formatHeader($result) . "[Whole page saved to: {$parsed['path']} (" . number_format(Text::length($whole)) . ' characters).]', 'info');
+
+                    return;
+                }
+
                 if (Text::length(WebFetch::formatHeader($result)) + Text::length($whole) > $result['maxChars']) {
                     // "Raw output is the crawled source itself; converted output keeps its provenance."
                     $saved = $parsed['raw']
@@ -847,7 +861,7 @@ return function (ExtensionApi $pig): void {
                 )), 'warning');
             }
         },
-        'Read a public web page via the Antigravity crawler (usage: /antigravity.fetch [--raw] <url>)',
+        'Read a public web page via the Antigravity crawler (usage: /antigravity.fetch [--raw] [--path <file>] <url>)',
     );
 
     // ---- extra tools: google_search, read_url_content & generate_image -----------------

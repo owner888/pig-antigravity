@@ -53,7 +53,7 @@ Signing in again with another Google account keeps the first one. A hard quota w
 | `/antigravity.refresh` | Ask the deployment for its catalog now |
 | `/antigravity.credits [on\|off]` | The account's Google One AI credit balance, and whether requests may spend it once a quota pool is empty. Off until you turn it on; kept as `useG1Credits` in pig's `settings.json` |
 | `/antigravity.search [--thinking] [--url <url>] <query>` | Google Search grounding |
-| `/antigravity.fetch [--raw] <url>` | Read a web page the way `read_url_content` does; `--raw` shows what the crawler returned, unconverted |
+| `/antigravity.fetch [--raw] [--path <file>] <url>` | Read a web page the way `read_url_content` does; `--raw` shows what the crawler returned, unconverted; `--path` writes the whole page to a file inside the working directory instead of showing it |
 | `/antigravity.image [--ratio <w:h>] [--model <id>] [--path <file>] <prompt>` | Generate an image |
 | `/antigravity.doctor` | Diagnostics with secrets removed |
 
