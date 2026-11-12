@@ -4,6 +4,12 @@ What changed, newest first, in pig's format: `## Unreleased` while working, `## 
 at release. The version lives in the git tag only, and follows the pi-antigravity release the port
 is in step with.
 
+## Unreleased
+
+### Fixed
+
+- "This model is unavailable right now (Resource has been exhausted …)" ended the turn although the model was only short of capacity on one endpoint or one tier — `gemini-4-argon` at medium with quota left, say. A 429 that names no limit is now asked of the other endpoint, and then of the model's other tiers (high first, then medium, low), before the turn fails; the failure is still not retried by the session, and a quota wall with a reset time is unchanged (pi-antigravity 0.13.0, #122, #125).
+
 ## [0.12.0] - 2026-11-10
 
 ### New Features

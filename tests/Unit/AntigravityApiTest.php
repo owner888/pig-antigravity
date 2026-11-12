@@ -351,16 +351,17 @@ final class AntigravityApiTest extends TestCase
         $this->assertNotSame('', $second->receivedHead(), 'the second host was asked');
     }
 
-    public function testA429ThatNamesNoLimitIsAModelNotBeingServedAndIsNeitherWalkedNorRetried(): void
+    public function testA429ThatNamesNoLimitIsAskedOfEveryEndpointAndThenIsAModelNotBeingServed(): void
     {
         // pi-antigravity 0.11: "A generic RESOURCE_EXHAUSTED body, with no reset hint, is how
-        // unavailable models fail." Every endpoint would say the same, the session's backoff would
-        // spend itself on it, and it is not this account's quota either.
+        // unavailable models fail." 0.13: the other endpoint may still be serving it, so it is
+        // asked too; when it says the same, the session's backoff is not spent on it, and it is not
+        // this account's quota either. `gemini-3-flash` ends in no tier, so no sibling is tried.
         $first = new CannedServer();
         $url = $first->start([self::refusal(429, 'Resource has been exhausted (e.g. check quota).')]);
 
         $second = new CannedServer();
-        $secondUrl = $second->start([self::refusal(200, 'unused')]);
+        $secondUrl = $second->start([self::refusal(429, 'Resource has been exhausted (e.g. check quota).')]);
         $asked = 0;
         $failover = static function () use (&$asked): ?string {
             $asked++;
@@ -372,12 +373,13 @@ final class AntigravityApiTest extends TestCase
 
         // No status in it: the digits alone are what the session's retry pattern reads.
         $this->assertSame(
-            'Antigravity API error (request-failed, endpoint=' . rtrim($url, '/') . ', project=proj-1, runtimeModel=gemini-3-flash, matched=static:gemini-3-flash, available=' . implode(',', \PigAntigravity\Routing::models()) . '): '
+            'Antigravity API error (request-failed, endpoint=' . $secondUrl . ', project=proj-1, runtimeModel=gemini-3-flash, matched=static:gemini-3-flash, available=' . implode(',', \PigAntigravity\Routing::models()) . '): '
             . 'This model is unavailable right now (Resource has been exhausted (e.g. check quota).). Next: switch to gemini-3.8-flash or another Flash model. This is not necessarily an account quota wall.',
             $message,
         );
         $this->assertFalse(\Pig\Ai\Utils\Retry::isRetryableAssistantError(new AssistantMessage([], Api::Extension, 'antigravity', 'm', new \Pig\Ai\Usage(), StopReason::Error, $message)));
-        $this->assertSame('', $second->receivedHead(), 'the second host was never asked');
+        $this->assertNotSame('', $second->receivedHead(), 'the second host was asked');
+        $this->assertSame([1, 1], [$first->connections(), $second->connections()], 'each once');
         $this->assertSame(0, $asked, 'and no other account either: it is not a quota wall');
 
         // The statuses the session does retry keep their number — where pig is narrower than upstream.
@@ -386,6 +388,55 @@ final class AntigravityApiTest extends TestCase
         $busyMessage = (string) $this->drain(new Antigravity(fallback: rtrim($busyUrl, '/')), $this->model($busyUrl), 'gemini-3-flash', 'low', new Context([new UserMessage('busy')]));
         $this->assertStringStartsWith('Antigravity API error (503, endpoint=', $busyMessage);
         $this->assertTrue(\Pig\Ai\Utils\Retry::isRetryableAssistantError(new AssistantMessage([], Api::Extension, 'antigravity', 'm', new \Pig\Ai\Usage(), StopReason::Error, $busyMessage)));
+    }
+
+    public function testATierOutOfCapacityStepsToASiblingTierOfTheSameModel(): void
+    {
+        // pi-antigravity 0.13 (#122, #125): a tier that answers the generic 429 on every endpoint
+        // may be the only one of its model out of capacity, so the same-generation tiers are
+        // asked, highest first, before the turn fails.
+        $ok = $this->okPieces([['response' => ['candidates' => [['content' => ['parts' => [['text' => 'from high']]], 'finishReason' => 'STOP']]]]]);
+        $url = $this->server->startSequence([
+            [self::refusal(429, 'Resource has been exhausted (e.g. check quota).')],
+            $ok,
+        ]);
+
+        // One host, so the second answer is the sibling tier's and not the other endpoint's.
+        $failure = $this->drain(new Antigravity(fallback: rtrim($url, '/')), $this->model($url), 'gemini-3.8-flash', 'medium', new Context([new UserMessage('hi')]));
+
+        $this->assertNull($failure);
+        $this->assertSame(2, $this->server->connections());
+        $this->assertStringContainsString('"model":"gemini-3.8-flash-high"', $this->server->received());
+        $this->assertStringContainsString('"model_enum":"' . \PigAntigravity\Routing::enumOf('gemini-3.8-flash-high') . '"', $this->server->received());
+    }
+
+    public function testAModelOutOfCapacityOnEveryTierFailsOnceAndIsNotRetried(): void
+    {
+        $refusal = [self::refusal(429, 'Resource has been exhausted (e.g. check quota).')];
+        $url = $this->server->startSequence([$refusal, $refusal, $refusal, $refusal, $refusal]);
+
+        $message = (string) $this->drain(new Antigravity(fallback: rtrim($url, '/')), $this->model($url), 'gemini-3.8-flash', 'medium', new Context([new UserMessage('hi')]));
+
+        // medium, then high and low: every tier the tables route this model to, each asked once.
+        $this->assertSame(3, $this->server->connections());
+        $this->assertStringStartsWith('Antigravity API error (request-failed, endpoint=', $message);
+        $this->assertStringContainsString('runtimeModel=gemini-3.8-flash-low,', $message);
+        $this->assertStringContainsString('This model is unavailable right now (', $message);
+        $this->assertFalse(\Pig\Ai\Utils\Retry::isRetryableAssistantError(new AssistantMessage([], Api::Extension, 'antigravity', 'm', new \Pig\Ai\Usage(), StopReason::Error, $message)));
+    }
+
+    public function testAQuotaWallIsNotATierOutOfCapacity(): void
+    {
+        // "Hard quota walls with a reset time are unchanged": no other endpoint, no sibling tier.
+        $url = $this->server->startSequence([
+            [self::refusal(429, 'Resource has been exhausted. Resets in 2h 10m.')],
+            [self::refusal(200, 'unused')],
+        ]);
+
+        $message = (string) $this->drain(new Antigravity(fallback: rtrim($url, '/')), $this->model($url), 'gemini-3.8-flash', 'medium', new Context([new UserMessage('hi')]));
+
+        $this->assertSame(1, $this->server->connections());
+        $this->assertStringStartsWith('Quota reached. Please wait 2h 10m.', $message);
     }
 
     public function testTheModelThatActuallyAnsweredIsOnTheMessage(): void

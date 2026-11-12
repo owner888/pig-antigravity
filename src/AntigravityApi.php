@@ -317,9 +317,12 @@ final class AntigravityApi implements StreamApi
      * The runtime model `Routing` resolves, then `Routing::fallback()`'s (pi-antigravity's
      * `getFallbackRuntimeModel()`) when that one is answered 404. For each, every endpoint in turn
      * while the answer is one of `FALL_BACK_ON`, stopping at a success, at any other status, or at
-     * a 429 that is not short throttling: a quota wall (`isQuotaWall()`), or the generic resource
-     * exhaustion a model that is not being served answers with — "a dead model, not a reason to
-     * walk every endpoint". An endpoint that fails before it answers (cannot connect, no response
+     * a quota wall (`isQuotaWall()`). A generic resource exhaustion — a 429 that names no limit —
+     * walks the endpoints too, and when every one said it, the same-generation tiers
+     * (`Routing::siblings()`), four runtime models at most: pi-antigravity 0.13, "capacity pressure
+     * when another endpoint or same-generation tier might still be live. A model that fails every
+     * one of those still uses the non-retryable message." An endpoint that fails before it answers
+     * (cannot connect, no response
      * head in time) is passed over for the next one too, and only when none answered is that
      * failure the turn's. A quota wall then asks `$failover` for an
      * account not yet tried and starts over with it, its own project in the envelope; with none
@@ -372,7 +375,9 @@ final class AntigravityApi implements StreamApi
             $lastHost = $primary;
             $runtime = $initial;
 
-            foreach ($candidates as $index => $runtime) {
+            // Not `foreach`: a sibling tier is put into the list while it is being walked.
+            for ($index = 0; $index < count($candidates); $index++) {
+                $runtime = $candidates[$index];
                 $last = null;
                 $lastEndpointError = null;
 
@@ -403,7 +408,17 @@ final class AntigravityApi implements StreamApi
 
                     $lastText = $last->body->all();
 
-                    if ($last->status === 429 && (self::isQuotaWall($lastText) || !self::isRetryableRateLimit($lastText))) {
+                    if ($last->status === 429 && self::isQuotaWall($lastText)) {
+                        break;
+                    }
+
+                    // "Generic RESOURCE_EXHAUSTED is capacity pressure when another endpoint or
+                    // same-generation tier might still be live."
+                    if ($last->status === 429 && self::isGenericResourceExhausted($lastText)) {
+                        continue;
+                    }
+
+                    if ($last->status === 429 && !self::isRetryableRateLimit($lastText)) {
                         break;
                     }
 
@@ -422,6 +437,17 @@ final class AntigravityApi implements StreamApi
                 // "if (response?.status === 404) { if (candIdx + 1 < runtimeCandidates.length) continue; }"
                 if ($last?->status === 404 && $index + 1 < count($candidates)) {
                     continue;
+                }
+
+                if ($last?->status === 429 && self::isGenericResourceExhausted($lastText) && count($candidates) < 4) {
+                    $sibling = array_values(array_diff(Routing::siblings($runtime), $candidates))[0] ?? null;
+
+                    if ($sibling !== null) {
+                        // "Same-generation tiers before a cross-generation compatibility fallback."
+                        array_splice($candidates, $index + 1, 0, [$sibling]);
+
+                        continue;
+                    }
                 }
 
                 break;
@@ -514,6 +540,21 @@ final class AntigravityApi implements StreamApi
     private static function isRetryableRateLimit(string $text): bool
     {
         return preg_match('/rate.?limit|too many requests/i', $text) === 1;
+    }
+
+    /**
+     * pi-antigravity's `isGenericResourceExhausted()`: "Generic capacity 429 with no reset hint.
+     * Dead tiers and live-but-throttled tiers share this body. Callers decide whether to walk
+     * endpoints and sibling tiers; the public error stays non-retryable for Pi once those attempts
+     * are exhausted."
+     */
+    private static function isGenericResourceExhausted(string $text): bool
+    {
+        if (self::isQuotaWall($text) || self::isRetryableRateLimit($text)) {
+            return false;
+        }
+
+        return preg_match('/resource has been exhausted|RESOURCE_EXHAUSTED/i', $text) === 1;
     }
 
     /**

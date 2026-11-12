@@ -297,6 +297,62 @@ final class Routing
         return self::$routing === null || self::advertises($candidate) ? $candidate : null;
     }
 
+    /** pi-antigravity's `RUNTIME_TIER_SUFFIXES`, in the order `siblings()` prefers them. */
+    private const array SIBLING_TIERS = ['-high', '-medium', '-low', '-extra-low', '-max'];
+
+    /**
+     * The same-generation tiers to try after $runtime is answered with a generic
+     * `RESOURCE_EXHAUSTED` — pi-antigravity 0.13's `advertisedSiblingRuntimes()`: "Highest
+     * remaining tier first, so a dead `-low` route (Gemini 3.8 Flash with reasoning off) moves to
+     * `-high` / `-medium`, and `gemini-4-argon-high` can step down to `-medium`." A runtime id that
+     * ends in no tier (`gemini-3-flash`, `gemini-2.5-flash-thinking`) has no siblings.
+     *
+     * Only the tiers the tables in use route some model to. Upstream goes on, for a `gemini-` or
+     * `claude-` family none of whose siblings is routed, to guess the first two; pig's envelope
+     * cannot carry a runtime model it has no enum to name (as with `fallback()`), and an id no
+     * table routes to has none, so there is nothing to guess with.
+     *
+     * @return list<string>
+     */
+    public static function siblings(string $runtime): array
+    {
+        $own = null;
+
+        // Upstream's `runtimeTier()` asks `-extra-low` before `-low`.
+        foreach (['-extra-low', '-low', '-medium', '-high', '-max'] as $suffix) {
+            if (str_ends_with($runtime, $suffix) && strlen($runtime) > strlen($suffix)) {
+                $own = $suffix;
+
+                break;
+            }
+        }
+
+        if ($own === null) {
+            return [];
+        }
+
+        $base = substr($runtime, 0, -strlen($own));
+        $routed = [];
+
+        foreach (self::routing() as $entry) {
+            foreach ([$entry['off'] ?? null, $entry['default'], ...array_values($entry['levels'])] as $id) {
+                if ($id !== null) {
+                    $routed[$id] = true;
+                }
+            }
+        }
+
+        $siblings = [];
+
+        foreach (self::SIBLING_TIERS as $suffix) {
+            if ($suffix !== $own && isset($routed[$base . $suffix], self::enums()[$base . $suffix])) {
+                $siblings[] = $base . $suffix;
+            }
+        }
+
+        return $siblings;
+    }
+
     /** Whether the installed catalog routes any model, at any level, to $runtime. */
     private static function advertises(string $runtime): bool
     {
