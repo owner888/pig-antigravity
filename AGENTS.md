@@ -46,7 +46,8 @@ this says how it is worked on. Keep this file under 100 lines.
 - **Spending is opt-in**: `Credits` reads the person's own settings file, never the session's
   merged settings, so a project cannot switch AI credit overages on.
 - **Where the reader differs from upstream on purpose**: a table cell's backslashes are not
-  doubled (`Turndown`, the `td`/`th` rule), so its escapes and link addresses stay whole; and
+  doubled (`Turndown`, the `td`/`th` rule), so its escapes and link addresses stay whole; a short
+  superscript or subscript is written `^30`, `_2` instead of run into the text; and
   `/antigravity.fetch` takes `--path <file>`.
 - **The reader asks Google's crawler and nothing else**: `read_url_content` never opens a
   connection to the page's own host, and `PublicUrl::check()` runs before any request.

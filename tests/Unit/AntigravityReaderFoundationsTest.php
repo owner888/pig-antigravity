@@ -290,6 +290,17 @@ final class AntigravityReaderFoundationsTest extends TestCase
         );
     }
 
+    public function testASuperscriptOrSubscriptKeepsItsPlaceUnlikeUpstream(): void
+    {
+        $this->assertSame(
+            'up to 2^30 a second, 0×10^1234, x^n+1, 10^−3, H_2O and CO_2; the 21st, a mark[\\[1\\]](https://e.com/n): 14 and E = mc2 squared',
+            Markdown::htmlToMarkdown(self::page(
+                '<p>up to 2<sup>30</sup> a second, 0×10<sup>1234</sup>, x<sup>n+1</sup>, 10<sup>−3</sup>, H<sub>2</sub>O and CO<sub>2</sub>; '
+                . 'the 21<sup>st</sup>, a mark<sup class="reference"><a href="/n">[1]</a></sup><sup class="reference">: 14</sup> and E = mc<sup>2 squared</sup></p>',
+            ), 'https://e.com/'),
+        );
+    }
+
     public function testTextThatWouldBeMarkdownIsEscapedAndWhitespaceIsWhatABrowserShows(): void
     {
         $document = Document::parse(self::page("<div><p>1. not a list, *not emphasis*, [not a link] and snake_case</p><p>  spread\n   over <em> lines </em>here </p><p># not a heading</p></div>"));

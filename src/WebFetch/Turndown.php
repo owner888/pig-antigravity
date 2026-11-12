@@ -248,6 +248,16 @@ final class Turndown
             case $name === 'del' || $name === 's' || $name === 'strike':
                 return "~~{$content}~~";
 
+            // The developer's choice, where upstream differs: upstream writes a superscript or a
+            // subscript as plain text, so 2 to the power 30 read "230". One short term — a number,
+            // a name, a signed or dotted one — is marked `^` or `_`. A footnote mark (it holds a
+            // link), an ordinal's letters and anything longer stay the text they were.
+            case ($name === 'sup' || $name === 'sub')
+                && $node->getElementsByTagName('a')->length === 0
+                && preg_match('/^[+\-−]?[\p{L}\p{N}]+(?:[+\-−.,\/][\p{L}\p{N}]+)*$/u', $content) === 1
+                && preg_match('/^(?:st|nd|rd|th|tm)$/i', $content) !== 1:
+                return ($name === 'sup' ? '^' : '_') . $content;
+
             // pi-antigravity's `inlineCodeText`: the code's own text, never an escaped rendering of it.
             case $name === 'code' && $parentName !== 'pre':
                 return self::inlineCode((string) preg_replace('/\r?\n|\r/', ' ', $node->textContent));
