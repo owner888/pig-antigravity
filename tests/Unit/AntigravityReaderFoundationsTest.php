@@ -270,6 +270,11 @@ final class AntigravityReaderFoundationsTest extends TestCase
             "Caption\n\n| A | B |  |\n| --- | --- | --- |\n| 1 | 2 \\| 3 |  |\n|  | x | y |",
             Markdown::htmlToMarkdown(self::page('<table><caption>Caption</caption><tr><th>A</th><th colspan="2">B</th></tr><tr><td rowspan="2">1</td><td>2 | 3</td></tr><tr><td>x</td><td>y</td></tr></table>')),
         );
+        // A cell's escapes are written once (upstream writes them twice), and its own backslash stays one.
+        $this->assertSame(
+            "out \\[1\\]\n\n| A | B |\n| --- | --- |\n| in \\[1\\] 1\\*2 a\\\\b | [C](https://e.com/w/C_\\(x\\)) |",
+            Markdown::htmlToMarkdown(self::page('<main><p>out [1]</p><table><tr><th>A</th><th>B</th></tr><tr><td>in [1] 1*2 a\\b</td><td><a href="/w/C_(x)">C</a></td></tr></table></main>'), 'https://e.com/'),
+        );
         $this->assertSame(
             "|  |  |\n| --- | --- |\n| a | b |",
             Markdown::htmlToMarkdown(self::page('<table><tr><td>a</td><td>b</td></tr><tr><td> </td><td></td></tr></table>')),

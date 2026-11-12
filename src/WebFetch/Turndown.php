@@ -236,7 +236,11 @@ final class Turndown
         switch (true) {
             // pi-antigravity's `tableCell`: "GFM cells cannot contain block-level Markdown or unescaped pipes."
             case $name === 'td' || $name === 'th':
-                $cell = str_replace(['\\', '|'], ['\\\\', '\\|'], (string) preg_replace('/[' . Text::SPACE . ']*\n[' . Text::SPACE . ']*/u', ' ', Text::trim($content)));
+                // The developer's choice, where upstream differs: upstream also doubles every backslash
+                // here, which doubles the escapes the conversion has just written (`\[1\]` became
+                // `\\[1\\]`, and a link to `C_(x)` lost its address). The text's own backslashes
+                // are already escaped by `escape()`, so only the pipe is left to do.
+                $cell = str_replace('|', '\\|', (string) preg_replace('/[' . Text::SPACE . ']*\n[' . Text::SPACE . ']*/u', ' ', Text::trim($content)));
 
                 return (self::previousElement($node) !== null ? ' ' : '| ') . $cell . ' |';
 
