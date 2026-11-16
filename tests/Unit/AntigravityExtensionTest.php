@@ -104,6 +104,36 @@ final class AntigravityExtensionTest extends TestCase
         $this->assertStringContainsString('Gemini (5 hours)', $summary);
     }
 
+    /** This port's own, at the developer's request: the group's description, and colour by role. */
+    public function testTheSummaryShowsEachGroupsDescriptionAndColoursABarByWhatIsLeft(): void
+    {
+        $bucket = static fn (string $name, float $left): array => ['bucketId' => $name, 'displayName' => $name, 'window' => null, 'resetTime' => null, 'description' => null, 'remainingFraction' => $left];
+        $usage = [
+            'planLabel' => 'Google AI Ultra (g1-ultra-tier)',
+            'groups' => [
+                ['displayName' => 'Gemini Models', 'description' => 'Models within this group: Gemini 4 Hydrogen, Gemini 3.8 Flash', 'buckets' => [$bucket('Weekly', 0.96), $bucket('Five Hour', 0.5)]],
+                ['displayName' => 'Gemini 4 Argon', 'description' => '  ', 'buckets' => [$bucket('Argon Weekly', 0.38), $bucket('Argon Daily', 0.199)]],
+            ],
+            'quotaError' => null,
+        ];
+
+        $plain = explode("\n", QuotaClient::formatUsageSummary($usage));
+        $this->assertSame('Gemini Models', $plain[2]);
+        $this->assertSame('  Models within this group: Gemini 4 Hydrogen, Gemini 3.8 Flash', $plain[3]);
+        $this->assertSame('  [' . str_repeat('█', 19) . '-] Weekly: 96% left · resets n/a', $plain[4]);
+        $this->assertSame(['Gemini 4 Argon', '  [' . str_repeat('█', 8) . str_repeat('-', 12) . '] Argon Weekly: 38% left · resets n/a'], array_slice($plain, 7, 2), 'a blank description is no line');
+
+        $painted = QuotaClient::formatUsageSummary($usage, static fn (string $role, string $text): string => "<{$role}>{$text}</{$role}>");
+        $this->assertStringContainsString('<label>Google AI Ultra (g1-ultra-tier)</label>', $painted);
+        $this->assertStringContainsString('<heading>Gemini Models</heading>', $painted);
+        $this->assertStringContainsString('  <note>Models within this group: Gemini 4 Hydrogen, Gemini 3.8 Flash</note>', $painted);
+        $this->assertStringContainsString('<plenty>[' . str_repeat('█', 19) . '-]</plenty> <label>Weekly: 96% left', $painted);
+        $this->assertStringContainsString('<plenty>[' . str_repeat('█', 10), $painted, 'half left is still plenty');
+        $this->assertStringContainsString('<low>[' . str_repeat('█', 8), $painted);
+        $this->assertStringContainsString('<nearlyOut>[' . str_repeat('█', 4), $painted);
+        $this->assertSame(preg_replace('/<[^>]+>/', '', $painted), implode("\n", $plain), 'the colours add nothing to the text');
+    }
+
     public function testFormatModelsListRendersTable(): void
     {
         $usage = [

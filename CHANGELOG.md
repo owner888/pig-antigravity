@@ -4,6 +4,12 @@ What changed, newest first, in pig's format: `## Unreleased` while working, `## 
 at release. The version lives in the git tag only, and follows the pi-antigravity release the port
 is in step with.
 
+## Unreleased
+
+### Changed
+
+- `/antigravity.usage` shows each quota group's description under its name — the deployment's own line naming the models that share the pool — and, in the terminal, colours each bar by how much is left: half or more, a fifth or more, less than that. Not pi-antigravity's; after Google's own CLI.
+
 ## [0.14.0] - 2026-11-16
 
 ### Added

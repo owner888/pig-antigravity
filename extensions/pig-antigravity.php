@@ -486,7 +486,22 @@ return function (ExtensionApi $pig): void {
             $emit($ctx, 'Fetching Antigravity usage…', 'info');
 
             try {
-                $emit($ctx, QuotaClient::formatUsageSummary((new QuotaClient())->fetchUsage($token, $projectId)), 'info');
+                // Coloured in the terminal only: a page or a pipe would show the escape codes.
+                $paint = null;
+
+                if ($ctx->hasUi && $ctx->mode() === 'tui') {
+                    $theme = $ctx->ui->theme();
+                    $paint = static fn (string $role, string $text): string => match ($role) {
+                        'heading' => $theme->bold($theme->fg('text', $text)),
+                        'note' => $theme->fg('muted', $text),
+                        'plenty' => $theme->fg('success', $text),
+                        'low' => $theme->fg('warning', $text),
+                        'nearlyOut' => $theme->fg('error', $text),
+                        default => $theme->fg('dim', $text),
+                    };
+                }
+
+                $emit($ctx, QuotaClient::formatUsageSummary((new QuotaClient())->fetchUsage($token, $projectId), $paint), 'info');
             } catch (Throwable $e) {
                 $emit($ctx, 'Antigravity usage failed: ' . $e->getMessage(), 'error');
             }

@@ -49,6 +49,9 @@ this says how it is worked on. Keep this file under 100 lines.
   doubled (`Turndown`, the `td`/`th` rule), so its escapes and link addresses stay whole; a short
   superscript or subscript is written `^30`, `_2` instead of run into the text; and
   `/antigravity.fetch` takes `--path <file>`.
+- **Where the usage summary differs from upstream on purpose**: `/antigravity.usage` shows a
+  group's description and, in the terminal, colours (`QuotaClient::formatUsageSummary()`'s
+  `$paint`); the text without colours is what a page or a pipe gets.
 - **The reader asks Google's crawler and nothing else**: `read_url_content` never opens a
   connection to the page's own host, and `PublicUrl::check()` runs before any request.
 - **Enterprise routing never falls back**: with `Enterprise::resolve()` answering a target, the

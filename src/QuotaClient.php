@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PigAntigravity;
 
+use Closure;
 use Pig\Ai\Http\HttpClient;
 use Pig\Ai\Http\Request;
 use RuntimeException;
@@ -113,21 +114,29 @@ final class QuotaClient
     /**
      * Format a summary of quota pools with progress bars.
      *
-     * @param array{planLabel: ?string, groups: list<array{displayName: string, buckets: list<array{displayName: string, remainingFraction: float, resetTime: ?string}>}>, quotaError: ?string} $usage
+     * Two things here are this port's and not pi-antigravity's, at the developer's request, after
+     * Google's own CLI: each group's description is shown under its name (the deployment's line
+     * naming the models that share the pool), and with `$paint` the parts are coloured — a bar by
+     * how much is left. Without `$paint` the text is plain, which is what a page or a pipe gets.
+     *
+     * @param array{planLabel: ?string, groups: list<array{displayName: string, description?: ?string, buckets: list<array{displayName: string, remainingFraction: float, resetTime: ?string}>}>, quotaError: ?string} $usage
+     * @param (Closure(string, string): string)|null $paint a role — `heading`, `note`, `label`, or
+     *        `plenty` / `low` / `nearlyOut` for a bar — and the text to colour for it
      */
-    public static function formatUsageSummary(array $usage): string
+    public static function formatUsageSummary(array $usage, ?Closure $paint = null): string
     {
+        $paint ??= static fn (string $role, string $text): string => $text;
         $lines = [];
 
         if (!empty($usage['planLabel'])) {
-            $lines[] = $usage['planLabel'];
+            $lines[] = $paint('label', $usage['planLabel']);
         }
 
         if (empty($usage['groups'])) {
             if (!empty($usage['quotaError'])) {
-                $lines[] = self::quotaErrorNote($usage['quotaError']);
+                $lines[] = $paint('label', self::quotaErrorNote($usage['quotaError']));
             } else {
-                $lines[] = 'No quota groups returned.';
+                $lines[] = $paint('label', 'No quota groups returned.');
             }
 
             return implode("\n", $lines);
@@ -137,17 +146,31 @@ final class QuotaClient
             if ($lines !== []) {
                 $lines[] = '';
             }
-            $lines[] = $group['displayName'];
+            $lines[] = $paint('heading', $group['displayName']);
+            $description = trim((string) ($group['description'] ?? ''));
+            if ($description !== '') {
+                $lines[] = '  ' . $paint('note', $description);
+            }
             foreach ($group['buckets'] as $bucket) {
                 $fraction = $bucket['remainingFraction'];
                 $percent = round($fraction * 100, 1);
-                $bar = self::progressBar($fraction);
+                $bar = $paint(self::barRole($fraction), self::progressBar($fraction));
                 $reset = self::formatReset($bucket['resetTime'] ?? null);
-                $lines[] = "  {$bar} {$bucket['displayName']}: {$percent}% left · resets {$reset}";
+                $lines[] = "  {$bar} " . $paint('label', "{$bucket['displayName']}: {$percent}% left · resets {$reset}");
             }
         }
 
         return implode("\n", $lines);
+    }
+
+    /** What a bar is coloured as: half or more left, a fifth or more, less than that. */
+    public static function barRole(float $remaining): string
+    {
+        return match (true) {
+            $remaining >= 0.5 => 'plenty',
+            $remaining >= 0.2 => 'low',
+            default => 'nearlyOut',
+        };
     }
 
     /**
