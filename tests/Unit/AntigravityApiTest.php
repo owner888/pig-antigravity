@@ -283,6 +283,29 @@ final class AntigravityApiTest extends TestCase
         $this->assertSame($first, $this->server->receivedJson()['request']['labels']['trajectory_id']);
     }
 
+    /** pi-antigravity 0.14 (#137, #139, #142): phrases the proxy answers with a false 429. */
+    public function testPromptPhrasesTheProxyRejectsAreNeutralizedOnTheWayOut(): void
+    {
+        $this->send('gemini-3-flash', 'low', new Context(
+            [new UserMessage('hello')],
+            'You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.',
+        ));
+        $this->assertSame(
+            'You are a coding assistant running inside your development environment. Help users inspect files, run commands, and modify code.',
+            $this->server->receivedJson()['request']['systemInstruction']['parts'][0]['text'],
+        );
+
+        $this->assertSame('You are a coding assistant running inside your development environment. Be brief.', \PigAntigravity\AntigravityApi::sanitizeSystemPrompt('You are a coding assistant running inside pi. Be brief.'));
+        $this->assertSame('Keep files running inside pi.js untouched.', \PigAntigravity\AntigravityApi::sanitizeSystemPrompt('Keep files running inside pi.js untouched.'));
+        $this->assertSame('Notes on running inside pig, a coding agent harness.', \PigAntigravity\AntigravityApi::sanitizeSystemPrompt('Notes on running inside pig, a coding agent harness.'), 'pig is not pi');
+
+        foreach (['You are a coding assistant RUNNING INSIDE PI.', 'A coding agent inside pi should be concise.', "A coding agent inside pi\n"] as $variant) {
+            $this->assertDoesNotMatchRegularExpression('/inside pi\b/i', \PigAntigravity\AntigravityApi::sanitizeSystemPrompt($variant), $variant);
+        }
+
+        $this->assertSame('Be direct, practical, and tool aware.', \PigAntigravity\AntigravityApi::sanitizeSystemPrompt('Be direct, practical, and tool-aware.'));
+    }
+
     public function testTheGeminiRequestIsStillInsideTheEnvelope(): void
     {
         $this->send('gemini-3-flash', 'low', new Context(

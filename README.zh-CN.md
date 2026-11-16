@@ -1,6 +1,6 @@
 # pig-antigravity
 
-给 [pig](https://github.com/owner888/pig) 编程智能体用的 Google Antigravity：用 Antigravity 订阅跑 Gemini、Claude 和 GPT-OSS，不走按量计费的 API key。它是 [pi-antigravity](https://github.com/Rahularya01/pi-antigravity) 的 PHP 移植，跟随其版本同步（当前 0.13.0）。
+给 [pig](https://github.com/owner888/pig) 编程智能体用的 Google Antigravity：用 Antigravity 订阅跑 Gemini、Claude 和 GPT-OSS，不走按量计费的 API key。它是 [pi-antigravity](https://github.com/Rahularya01/pi-antigravity) 的 PHP 移植，跟随其版本同步（当前 0.14.0）。
 
 [English](README.md)
 

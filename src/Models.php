@@ -65,6 +65,7 @@ final class Models
      * @var array<string, array{0: float, 1: float, 2: float, 3: float}>
      */
     private const array COSTS = [
+        'gemini-4-hydrogen' => [1.5, 7.5, 0.075, 1.5],
         'gemini-3.8-flash' => [0.75, 3.75, 0.075, 0.75],
         'gemini-3.7-flash' => [0.75, 3.75, 0.075, 0.75],
         'gemini-3.6-flash' => [0.75, 3.75, 0.075, 0.75],
@@ -81,6 +82,35 @@ final class Models
         'claude-sonnet-5-5' => [3.0, 15.0, 0.3, 3.75],
         'gpt-oss-120b' => [0.6, 2.4, 0.15, 0.6],
     ];
+
+    /**
+     * The most output a model takes, by public id — the public-id rows of pi-antigravity's
+     * `RUNTIME_MAX_OUTPUT_TOKENS`: "Verified maximum output tokens accepted by the Cloud Code Assist
+     * backend … Requesting more than these limits returns a 400 Bad Request from the API." Its
+     * runtime-id rows are not here: nothing in this port looks a limit up by runtime id.
+     *
+     * @var array<string, int>
+     */
+    private const array MAX_OUTPUT_TOKENS = [
+        'gemini-4-hydrogen' => 262_144,
+        'gemini-3.8-flash' => 65_536,
+        'gemini-3.7-flash' => 65_536,
+        'gemini-3.6-flash' => 65_536,
+        'gemini-3.5-flash' => 65_536,
+        'gemini-3.1-pro' => 65_535,
+        'claude-opus-4-6' => 64_000,
+        'claude-sonnet-4-6' => 64_000,
+        'gpt-oss-120b' => 32_768,
+    ];
+
+    /**
+     * What `Grouping` gives a discovered model whose catalog entry states no limit, before its
+     * family's template (0.14): Gemini 4 Hydrogen takes 262,144 where the template says 65,535.
+     */
+    public static function maxOutputTokens(string $id): ?int
+    {
+        return self::MAX_OUTPUT_TOKENS[$id] ?? null;
+    }
 
     /**
      * pi-antigravity's `getAntigravityModelCost()`: a model's list price by public id, in the

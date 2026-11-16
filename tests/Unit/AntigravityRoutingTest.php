@@ -151,6 +151,23 @@ final class AntigravityRoutingTest extends TestCase
         $this->assertSame([], Routing::siblings('gpt-oss-120b-medium'));
     }
 
+    /** pi-antigravity 0.14: `-xhigh` is a tier, tried after `-high` and `-medium`. */
+    public function testAnXhighTierStepsDownToHighThenMediumAndIsTriedAfterThem(): void
+    {
+        $levels = ['low' => 'gemini-4-hydrogen-low', 'medium' => 'gemini-4-hydrogen-medium', 'high' => 'gemini-4-hydrogen-high', 'xhigh' => 'gemini-4-hydrogen-xhigh'];
+        Routing::useTables(
+            ['gemini-4-hydrogen' => ['default' => 'gemini-4-hydrogen-low', 'off' => 'gemini-4-hydrogen-low', 'levels' => $levels]],
+            array_combine(array_values($levels), ['MODEL_H_LOW', 'MODEL_H_MEDIUM', 'MODEL_H_HIGH', 'MODEL_H_XHIGH']),
+        );
+
+        try {
+            $this->assertSame(['gemini-4-hydrogen-high', 'gemini-4-hydrogen-medium', 'gemini-4-hydrogen-low'], Routing::siblings('gemini-4-hydrogen-xhigh'));
+            $this->assertSame(['gemini-4-hydrogen-high', 'gemini-4-hydrogen-xhigh', 'gemini-4-hydrogen-low'], Routing::siblings('gemini-4-hydrogen-medium'));
+        } finally {
+            Routing::forgetTables();
+        }
+    }
+
     public function testSiblingTiersComeFromTheCatalogInUse(): void
     {
         Routing::useTables(

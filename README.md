@@ -1,6 +1,6 @@
 # pig-antigravity
 
-Google Antigravity for the [pig](https://github.com/owner888/pig) coding agent: Gemini, Claude and GPT-OSS on an Antigravity subscription instead of a metered API key. A PHP port of [pi-antigravity](https://github.com/Rahularya01/pi-antigravity), kept in step with its releases (currently 0.13.0).
+Google Antigravity for the [pig](https://github.com/owner888/pig) coding agent: Gemini, Claude and GPT-OSS on an Antigravity subscription instead of a metered API key. A PHP port of [pi-antigravity](https://github.com/Rahularya01/pi-antigravity), kept in step with its releases (currently 0.14.0).
 
 [中文](README.zh-CN.md)
 

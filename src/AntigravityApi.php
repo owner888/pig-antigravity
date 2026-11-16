@@ -624,6 +624,37 @@ final class AntigravityApi implements StreamApi
     }
 
     /**
+     * pi-antigravity 0.14's `sanitizeSystemPrompt()`: "Neutralize system prompt phrases that
+     * trigger false 429 RESOURCE_EXHAUSTED responses from the Antigravity proxy when paired with
+     * `requestType: "agent"`."
+     *
+     * pig's own prompt has none of them (`SystemPrompt::ROLE` leaves "running inside pi, a coding
+     * agent harness" out), but the prompt sent is also a custom one, an `--append-system-prompt`
+     * and every context file, and any of those can quote pi's.
+     */
+    public static function sanitizeSystemPrompt(string $text): string
+    {
+        // `\z`, not `$`: JavaScript's `$` does not match before a trailing newline, PCRE's does.
+        return (string) preg_replace(
+            [
+                '/running inside pi,\s*a coding agent harness/i',
+                '/inside pi,\s*a coding agent harness/i',
+                '/(coding assistant )running inside pi(?=[.,!?;:\s]|\z)(?!\.\w)/i',
+                '/(coding agent )inside pi(?=[.,!?;:\s]|\z)(?!\.\w)/i',
+                '/\bpractical,\s*and tool-aware\./i',
+            ],
+            [
+                'running inside your development environment',
+                'inside your development environment',
+                '$1running inside your development environment',
+                '$1inside your development environment',
+                'practical, and tool aware.',
+            ],
+            $text,
+        );
+    }
+
+    /**
      * The envelope, with a Gemini request inside it.
      *
      * Every field is the reference implementation's, including the ones whose purpose is not
@@ -665,7 +696,7 @@ final class AntigravityApi implements StreamApi
         $tools = Transcript::getCurrentTools($context->messages);
 
         if ($systemPrompt !== '') {
-            $inner['systemInstruction'] = GoogleShared::systemInstruction($systemPrompt);
+            $inner['systemInstruction'] = GoogleShared::systemInstruction(self::sanitizeSystemPrompt($systemPrompt));
         }
 
         if ($tools !== []) {

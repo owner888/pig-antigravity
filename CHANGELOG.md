@@ -4,6 +4,22 @@ What changed, newest first, in pig's format: `## Unreleased` while working, `## 
 at release. The version lives in the git tag only, and follows the pi-antigravity release the port
 is in step with.
 
+## [0.14.0] - 2026-11-16
+
+### Added
+
+- **Gemini 4 Hydrogen and Oxygen** — both are selectable although Google's own picker lists do not name them yet; an `-xhigh` runtime variant and a display name ending `(XHigh)` or `(X-High)` are the `xhigh` thinking level; a model that has only an `xhigh` variant routes every level to it. Hydrogen carries its list price ($1.50 / $7.50 / $0.075 per million tokens) and its own output limit of 262,144 tokens where the catalog states none, instead of its family's 65,535.
+
+### Changed
+
+- In step with pi-antigravity 0.14.0.
+- A capacity 429 on an `-xhigh` tier steps down to `-high`, then `-medium`; `-xhigh` itself is tried after those two.
+
+### Fixed
+
+- A model the deployment has switched off (`disabled: true`, or an id ending `-disabled`) was offered in `/model` when the picker's lists still named it.
+- "This model is unavailable right now (Resource has been exhausted …)" in a session whose prompt quoted pi's: Google's proxy answers certain phrases with a false 429 — "running inside pi, a coding agent harness", "coding assistant running inside pi", "coding agent inside pi", "practical, and tool-aware." — and they are now reworded in the system instruction on the way out. pig's own prompt has none of them; a custom prompt, an appended one or a context file can.
+
 ## [0.13.0] - 2026-11-12
 
 ### New Features

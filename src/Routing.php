@@ -298,7 +298,7 @@ final class Routing
     }
 
     /** pi-antigravity's `RUNTIME_TIER_SUFFIXES`, in the order `siblings()` prefers them. */
-    private const array SIBLING_TIERS = ['-high', '-medium', '-low', '-extra-low', '-max'];
+    private const array SIBLING_TIERS = ['-high', '-medium', '-xhigh', '-low', '-extra-low', '-max'];
 
     /**
      * The same-generation tiers to try after $runtime is answered with a generic
@@ -319,7 +319,7 @@ final class Routing
         $own = null;
 
         // Upstream's `runtimeTier()` asks `-extra-low` before `-low`.
-        foreach (['-extra-low', '-low', '-medium', '-high', '-max'] as $suffix) {
+        foreach (['-extra-low', '-low', '-medium', '-high', '-max', '-xhigh'] as $suffix) {
             if (str_ends_with($runtime, $suffix) && strlen($runtime) > strlen($suffix)) {
                 $own = $suffix;
 

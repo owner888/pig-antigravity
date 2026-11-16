@@ -478,6 +478,63 @@ final class AntigravityDiscoveryTest extends TestCase
         ], $merged['data']['agentModelSorts']);
     }
 
+    /** pi-antigravity 0.14 (#132, #133, #134, #136), `test-model-discovery.ts`. */
+    public function testGemini4HydrogenAndOxygenGroupWithAnXhighLevelAndWhatIsSwitchedOffStaysOut(): void
+    {
+        $catalog = Grouping::buildAntigravityCatalog([
+            'gemini-4-hydrogen-low' => ['displayName' => 'Gemini 4 Hydrogen (Low)', 'model' => 'MODEL_HYDROGEN_LOW'],
+            'gemini-4-hydrogen-medium' => ['displayName' => 'Gemini 4 Hydrogen (Medium)', 'model' => 'MODEL_HYDROGEN_MED'],
+            'gemini-4-hydrogen-high' => ['displayName' => 'Gemini 4 Hydrogen (High)', 'model' => 'MODEL_HYDROGEN_HIGH'],
+            'gemini-4-hydrogen-xhigh' => ['displayName' => 'Gemini 4 Hydrogen (XHigh)', 'model' => 'MODEL_HYDROGEN_XHIGH'],
+            'gemini-4-carbon-disabled' => ['displayName' => 'Gemini 4 Carbon', 'model' => 'MODEL_CARBON_DIS', 'disabled' => true],
+        ], Discovery::fallbackCatalog());
+
+        $this->assertCount(1, $catalog['models']);
+        $hydrogen = $catalog['models'][0];
+        $this->assertSame('gemini-4-hydrogen', $hydrogen['id']);
+        $this->assertSame('Gemini 4 Hydrogen (Antigravity)', $hydrogen['name']);
+        $this->assertSame(['low' => 'low', 'medium' => 'medium', 'high' => 'high', 'xhigh' => 'xhigh'], array_intersect_key($hydrogen['thinkingLevelMap'], ['low' => 1, 'medium' => 1, 'high' => 1, 'xhigh' => 1]));
+        $this->assertSame(['input' => 1.5, 'output' => 7.5, 'cacheRead' => 0.075, 'cacheWrite' => 1.5], $hydrogen['cost']);
+        $this->assertSame(262_144, $hydrogen['maxTokens'], 'its own limit, not the family template\'s');
+        $this->assertSame('gemini-4-hydrogen-xhigh', $catalog['routing']['gemini-4-hydrogen']['routing']['xhigh']);
+
+        // "explicit discovery maxOutputTokens overrides static limit"
+        $stated = Grouping::buildAntigravityCatalog(['gemini-4-hydrogen-low' => ['displayName' => 'Gemini 4 Hydrogen (Low)', 'maxOutputTokens' => 131_072]], Discovery::fallbackCatalog());
+        $this->assertSame(131_072, $stated['models'][0]['maxTokens']);
+
+        // "xhigh-only model falls back to xhigh for defaultRequestId, off, and lower efforts"
+        $only = Grouping::buildAntigravityCatalog(['gemini-4-xhigh-only-xhigh' => ['displayName' => 'Gemini 4 XHigh Only (XHigh)']], Discovery::fallbackCatalog())['routing']['gemini-4-xhigh-only'];
+        $this->assertSame(['gemini-4-xhigh-only-xhigh', 'gemini-4-xhigh-only-xhigh', 'gemini-4-xhigh-only-xhigh'], [$only['defaultRequestId'], $only['off'], $only['routing']['low']]);
+    }
+
+    public function testHydrogenAndOxygenPassThePickersListsAndASwitchedOffModelDoesNotEvenWhenListed(): void
+    {
+        $catalog = Grouping::buildAntigravityCatalog(
+            [
+                'gemini-4-argon-medium' => ['displayName' => 'Gemini 4 Argon (Medium)'],
+                'gemini-4-hydrogen-low' => ['displayName' => 'Gemini 4 Hydrogen (Low)'],
+                'gemini-4-hydrogen-xhigh' => ['displayName' => 'Gemini 4 Hydrogen (X-High)'],
+                'gemini-4-oxygen-high' => ['displayName' => 'Gemini 4 Oxygen (Extra High)'],
+                'gemini-4-hydrogen-disabled' => ['displayName' => 'Gemini 4 Hydrogen (Disabled)', 'disabled' => true],
+                'gemini-4-oxygen-disabled' => ['displayName' => 'Gemini 4 Oxygen (Disabled)'],
+                'gemini-4-carbon-disabled' => ['displayName' => 'Gemini 4 Carbon', 'disabled' => true],
+            ],
+            Discovery::fallbackCatalog(),
+            [['displayName' => 'Recommended', 'groups' => [['modelIds' => ['gemini-4-argon-medium', 'gemini-4-hydrogen-disabled', 'gemini-4-carbon-disabled']]]]],
+        );
+        $ids = array_column($catalog['models'], 'id');
+        sort($ids);
+
+        $this->assertSame(['gemini-4-argon', 'gemini-4-hydrogen', 'gemini-4-oxygen'], $ids);
+        $this->assertSame('gemini-4-hydrogen-xhigh', $catalog['routing']['gemini-4-hydrogen']['routing']['xhigh']);
+        $this->assertSame('gemini-4-oxygen-high', $catalog['routing']['gemini-4-oxygen']['routing']['xhigh'], 'the level is the one the display name states');
+
+        $this->assertTrue(Grouping::isExtraAllowedModelId('gemini-4-oxygen'));
+        $this->assertFalse(Grouping::isExtraAllowedModelId('gemini-4-hydrogenated-low'));
+        $this->assertFalse(Grouping::isSelectableRuntimeModelId('gemini-4-argon-low', ['disabled' => true]));
+        $this->assertTrue(Grouping::isSelectableRuntimeModelId('gemini-4-argon-low', ['disabled' => 'true']), 'only the boolean, as upstream compares it');
+    }
+
     public function testADiscoveredModelCarriesItsOwnListPriceBeforeItsFamilys(): void
     {
         // pi-antigravity 0.13 (#103): "so a newly discovered Flash variant is not billed at another
@@ -494,6 +551,7 @@ final class AntigravityDiscoveryTest extends TestCase
         $this->assertNull(\PigAntigravity\Models::cost('gemini-3.9-flash'));
         $this->assertNull(\PigAntigravity\Models::cost('totally-unknown-model'));
         $this->assertSame(['input' => 1.5, 'output' => 9.0, 'cacheRead' => 0.15, 'cacheWrite' => 1.5], \PigAntigravity\Models::cost('gemini-3.5-flash'));
+        $this->assertSame(['input' => 1.5, 'output' => 7.5, 'cacheRead' => 0.075, 'cacheWrite' => 1.5], \PigAntigravity\Models::cost('gemini-4-hydrogen'));
         $this->assertSame(['input' => 5.0, 'output' => 25.0, 'cacheRead' => 0.5, 'cacheWrite' => 6.25], \PigAntigravity\Models::cost('claude-opus-5-5'));
     }
 

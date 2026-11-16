@@ -26,6 +26,7 @@ final class Grouping
     private const array THINKING_SUFFIXES = [
         ['extra-low', 'low'],
         ['extra-high', 'xhigh'],
+        ['xhigh', 'xhigh'],
         ['thinking', 'high'],
         ['minimal', 'minimal'],
         ['medium', 'medium'],
@@ -37,6 +38,7 @@ final class Grouping
     private const array DISPLAY_LEVELS = [
         ['/\(\s*extra\s*low\s*\)/i', 'low'],
         ['/\(\s*extra\s*high\s*\)/i', 'xhigh'],
+        ['/\(\s*x-?\s*high\s*\)/i', 'xhigh'],
         ['/\(\s*thinking\s*\)/i', 'high'],
         ['/\(\s*minimal\s*\)/i', 'minimal'],
         ['/\(\s*medium\s*\)/i', 'medium'],
@@ -51,7 +53,8 @@ final class Grouping
     /**
      * Whether a runtime id is one somebody can pick: any well-formed id, whatever family it is
      * from, that is not a placeholder enum, an internal chat or tab model, an image model (by id
-     * or by display name) or one the backend marks internal.
+     * or by display name), one the backend marks internal, or one it has switched off (`disabled`,
+     * or an id ending `-disabled`) — which stays out even when the picker's own lists name it.
      *
      * @param array<string, mixed>|null $info the runtime model's entry in `fetchAvailableModels`
      */
@@ -74,7 +77,20 @@ final class Grouping
             return false;
         }
 
+        if (($info['disabled'] ?? null) === true || str_ends_with($id, '-disabled')) {
+            return false;
+        }
+
         return true;
+    }
+
+    /**
+     * pi-antigravity 0.14's `isExtraAllowedModelId()`: the Gemini 4 Hydrogen and Oxygen variants
+     * are selectable although the picker's lists (`agentModelSorts`) do not name them yet.
+     */
+    public static function isExtraAllowedModelId(string $runtimeId): bool
+    {
+        return preg_match('/(?:^|-)(?:hydrogen|oxygen)(?:-|$)/i', $runtimeId) === 1;
     }
 
     /**
@@ -189,7 +205,7 @@ final class Grouping
                 continue;
             }
 
-            if ($filterIds !== null && !isset($filterIds[$runtimeId])) {
+            if ($filterIds !== null && !isset($filterIds[$runtimeId]) && !self::isExtraAllowedModelId($runtimeId)) {
                 continue;
             }
 
@@ -431,7 +447,7 @@ final class Grouping
             return null;
         }
 
-        $family = (string) preg_replace('/\s*\((?:extra\s*low|extra\s*high|low|medium|high|minimal|thinking)\)\s*$/i', '', $displayName);
+        $family = (string) preg_replace('/\s*\((?:extra\s*low|extra\s*high|x-?\s*high|low|medium|high|minimal|thinking)\)\s*$/i', '', $displayName);
 
         return strtolower(trim($family));
     }
@@ -469,7 +485,7 @@ final class Grouping
         // discovered Flash variant is not billed at another Flash's rate."
         $model['cost'] = Models::cost($group['publicId']) ?? $template['cost'] ?? self::ZERO_COST;
         $model['contextWindow'] = $group['contextWindow'] ?? $template['contextWindow'] ?? 128000;
-        $model['maxTokens'] = $group['maxOutputTokens'] ?? $template['maxTokens'] ?? 8192;
+        $model['maxTokens'] = $group['maxOutputTokens'] ?? Models::maxOutputTokens($group['publicId']) ?? $template['maxTokens'] ?? 8192;
 
         return [$model, $routing];
     }
@@ -504,7 +520,7 @@ final class Grouping
      */
     private static function routingFromVariants(string $publicId, array $variants, ?string $unsuffixed): array
     {
-        $defaultRequestId = $variants['low'] ?? $variants['minimal'] ?? $variants['medium'] ?? $variants['high'] ?? $unsuffixed ?? $publicId;
+        $defaultRequestId = $variants['low'] ?? $variants['minimal'] ?? $variants['medium'] ?? $variants['high'] ?? $variants['xhigh'] ?? $unsuffixed ?? $publicId;
 
         $pick = static function (string ...$keys) use ($variants, $unsuffixed, $defaultRequestId): string {
             foreach ($keys as $key) {
@@ -517,12 +533,12 @@ final class Grouping
         };
 
         return [
-            'off' => $pick('low', 'minimal', 'medium', 'high'),
+            'off' => $pick('low', 'minimal', 'medium', 'high', 'xhigh'),
             'routing' => [
-                'minimal' => $pick('minimal', 'low', 'medium', 'high'),
-                'low' => $pick('low', 'minimal', 'medium', 'high'),
-                'medium' => $pick('medium', 'low', 'high', 'minimal'),
-                'high' => $pick('high', 'medium', 'low', 'minimal'),
+                'minimal' => $pick('minimal', 'low', 'medium', 'high', 'xhigh'),
+                'low' => $pick('low', 'minimal', 'medium', 'high', 'xhigh'),
+                'medium' => $pick('medium', 'low', 'high', 'minimal', 'xhigh'),
+                'high' => $pick('high', 'medium', 'low', 'minimal', 'xhigh'),
                 'xhigh' => $pick('xhigh', 'high', 'medium', 'low'),
             ],
             'defaultRequestId' => $defaultRequestId,
