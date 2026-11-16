@@ -653,6 +653,20 @@ final class AntigravityApiTest extends TestCase
         $this->assertStringContainsString('"model":"gemini-3.8-flash-medium"', $this->server->received());
     }
 
+    public function testASuspendedAccountIsToldToAppealNotToSignInAgain(): void
+    {
+        $body = '{"error":{"code":403,"message":"This service has been disabled in this account for violation of Terms of Service. Please submit an appeal to continue using this product.","status":"PERMISSION_DENIED"}}';
+        $message = \PigAntigravity\AntigravityApi::friendlyAntigravityError(403, $body);
+
+        $this->assertSame(
+            'Google has disabled Antigravity for this account (Terms of Service). Next: submit an appeal to Google; signing in again or switching models will not lift it. '
+            . 'Backend said: This service has been disabled in this account for violation of Terms of Service. Please submit an appeal to continue using this product.',
+            $message,
+        );
+        $this->assertStringNotContainsString('re-login', $message);
+        $this->assertStringNotContainsString('try another model', $message);
+    }
+
     public function testEveryStatusIsWordedAsPiAntigravityWordsIt(): void
     {
         $friendly = \PigAntigravity\AntigravityApi::friendlyAntigravityError(...);

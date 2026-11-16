@@ -8,6 +8,7 @@ is in step with.
 
 ### Changed
 
+- An account Google has suspended ("This service has been disabled in this account for violation of Terms of Service") is told so, and to appeal: the error no longer says "re-login or try another model", neither of which lifts a suspension. Not pi-antigravity's wording.
 - `/antigravity.usage` shows each quota group's description under its name — the deployment's own line naming the models that share the pool — and, in the terminal, colours each bar by how much is left: half or more, a fifth or more, less than that. Not pi-antigravity's; after Google's own CLI.
 
 ## [0.14.0] - 2026-11-16

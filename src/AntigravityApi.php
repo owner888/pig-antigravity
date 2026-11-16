@@ -878,6 +878,8 @@ final class AntigravityApi implements StreamApi
      * reached. …` — which matches none of the retryable patterns, so the turn fails at once with
      * the time to wait — and any other 429 is transient throttling, `Rate limited by Antigravity
      * (429 ResourceExhausted)…`, which the session's backoff waits out.
+     *
+     * One 403 is worded here and not upstream: an account Google has suspended.
      */
     public static function friendlyAntigravityError(?int $status, string $text): string
     {
@@ -919,6 +921,13 @@ final class AntigravityApi implements StreamApi
             $verifyHint = $verifyUrl !== null
                 ? " Open this link in a browser signed in to the same Google account to verify: {$verifyUrl}"
                 : '';
+
+            // Not upstream's wording — the developer's choice. Google answers a suspended
+            // account with this sentence on every model, and upstream's "re-login or try another
+            // model" sends the person round a loop that cannot end.
+            if (preg_match('/disabled in this account for violation of Terms of Service/i', $msg) === 1) {
+                return "Google has disabled Antigravity for this account (Terms of Service). Next: submit an appeal to Google; signing in again or switching models will not lift it. Backend said: {$msg}";
+            }
 
             if (preg_match('/#3501|do not have a valid license of this product/i', $msg) === 1) {
                 return "This account's Gemini Enterprise license was not accepted on the consumer endpoint. Next: set ANTIGRAVITY_LOCATION to eu, us, or global, plus ANTIGRAVITY_ENTERPRISE_PROJECT and ANTIGRAVITY_USER_TIER from the license selector, then retry. A regional location is not sent to cloudcode-pa.";

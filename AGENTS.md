@@ -36,6 +36,8 @@ this says how it is worked on. Keep this file under 100 lines.
   redacted first (`redactSecrets()`).
 - **Where this is narrower than upstream on purpose**: `publicErrorStatus()` hides the status
   for a 429 only, so a 502/503 keeps its number and is still retried.
+- **Where the wording is not upstream's on purpose**: a 403 for a suspended account ("disabled
+  in this account for violation of Terms of Service") says to appeal, not to re-login.
 - The catalog is the deployment's answer and nothing else; grouping lives only in `Grouping`,
   network, TTL and storage only in `Discovery`, and a routing target with no enum refuses the
   whole catalog (`Catalog`).
