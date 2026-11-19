@@ -35,9 +35,9 @@ declare(strict_types=1);
  *   `/login antigravity` — the extension runs this itself rather than through
  *   `Provider::$refreshModels` and `ModelRefresh` — and on `/antigravity.refresh`, which forces it.
  *
- * The client id and secret are not in this repository (`ANTIGRAVITY_CLIENT_ID` /
+ * The OAuth client is the public Antigravity desktop one unless `ANTIGRAVITY_CLIENT_ID` /
  * `ANTIGRAVITY_CLIENT_SECRET`, or `antigravity.clientId` / `antigravity.clientSecret` in the
- * settings); see `antigravityClient()` below.
+ * settings, name another; see `antigravityClient()` below.
  */
 
 use Pig\Agent\AgentToolResult;
@@ -51,7 +51,6 @@ use Pig\Ai\ModelType;
 use Pig\Ai\StopReason;
 use Pig\Ai\TextContent;
 use Pig\Ai\Utils\Oauth\OauthCredentials;
-use Pig\Ai\Utils\Oauth\OauthError;
 use Pig\Async\AbortSignal;
 use Pig\Async\Async;
 use Pig\CodingAgent\Auth;
@@ -114,18 +113,12 @@ return function (ExtensionApi $pig): void {
     $http = new HttpClient();
 
     /**
-     * The OAuth client this deployment was registered under, which pig does not ship.
-     *
-     * Upstream embeds the pair behind `atob()`, and for a Google installed-application client that
-     * is defensible — the secret is not confidential by design and PKCE protects the exchange. It
-     * is still not something a repository can carry: GitHub's push protection matches them plain
-     * and base64-decoded, and a reported credential gets revoked. So: the environment, then the
-     * settings file. A renewal may fall back to the public desktop client's pair, because a token
-     * already minted under it has to be renewed under it.
+     * The OAuth client to sign in and renew under: the environment, then the settings file, then
+     * the public desktop client (`AntigravityOauth::client()`).
      *
      * @return array{0: string, 1: string}
      */
-    $antigravityClient = static function (bool $allowDefault = false) use ($auth): array {
+    $antigravityClient = static function () use ($auth): array {
         $id = getenv('ANTIGRAVITY_CLIENT_ID');
         $secret = getenv('ANTIGRAVITY_CLIENT_SECRET');
         $setting = static function (string $key) use ($auth): ?string {
@@ -134,23 +127,10 @@ return function (ExtensionApi $pig): void {
             return is_string($value) && $value !== '' ? $value : null;
         };
 
-        $id = is_string($id) && $id !== '' ? $id : $setting('antigravity.clientId');
-        $secret = is_string($secret) && $secret !== '' ? $secret : $setting('antigravity.clientSecret');
-
-        if (($id === null || $secret === null) && $allowDefault) {
-            $id ??= base64_decode('MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlc' . 'C5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ==', true) ?: null;
-            $secret ??= base64_decode('R09DU1BYLUs1OEZXUjQ' . '4NkxkTEoxbUxCOHNYQzR6NnFEQWY=', true) ?: null;
-        }
-
-        if ($id === null || $secret === null) {
-            throw new OauthError(
-                'Signing in to Antigravity needs its own client id and secret, which pig does not ship. '
-                . 'Set ANTIGRAVITY_CLIENT_ID and ANTIGRAVITY_CLIENT_SECRET, or put antigravity.clientId and '
-                . 'antigravity.clientSecret in ~/.pig/agent/settings.json.',
-            );
-        }
-
-        return [$id, $secret];
+        return AntigravityOauth::client(
+            is_string($id) && $id !== '' ? $id : $setting('antigravity.clientId'),
+            is_string($secret) && $secret !== '' ? $secret : $setting('antigravity.clientSecret'),
+        );
     };
 
     // ---- the provider -------------------------------------------------------------------

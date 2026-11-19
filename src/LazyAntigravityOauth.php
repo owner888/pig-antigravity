@@ -12,20 +12,16 @@ use Pig\Async\AbortSignal;
 /**
  * `AntigravityOauth`, built the moment it is used and not before.
  *
- * The flow's constructor refuses to exist without the client id and secret, which pig does not
- * ship — and this extension has to load, register its provider and list its sign-in whether or
- * not the pair is set, so that `/login antigravity` can say *what is missing* rather than the
- * provider being silently absent. So the row in the list is this, and the refusal happens on
- * `login()` or `refresh()`, where there is somebody to tell.
- *
- * A renewal may use the public desktop client's pair as a fallback (`allowDefault`), because a
- * token already minted under it has to be renewed under it; a fresh sign-in never does.
+ * A client pair set by halves is refused (`AntigravityOauth::client()`) — and this extension has
+ * to load, register its provider and list its sign-in all the same, so that `/login antigravity`
+ * can say *what is wrong* rather than the provider being silently absent. So the row in the list
+ * is this, and the refusal happens on `login()` or `refresh()`, where there is somebody to tell.
  */
 final class LazyAntigravityOauth implements OauthFlow
 {
     /**
-     * @param Closure(bool): array{0: string, 1: string} $client
-     * @param (Closure(OauthCredentials): void)|null          $onLogin told about a sign-in that finished
+     * @param Closure(): array{0: string, 1: string} $client
+     * @param (Closure(OauthCredentials): void)|null $onLogin told about a sign-in that finished
      */
     public function __construct(private readonly Closure $client, private readonly ?Closure $onLogin = null)
     {
@@ -57,7 +53,7 @@ final class LazyAntigravityOauth implements OauthFlow
         ?AbortSignal $signal = null,
         ?Closure $onSelect = null,
     ): ?OauthCredentials {
-        $credentials = $this->flow(false)->login($onAuth, $onPrompt, $onProgress, $signal, $onSelect);
+        $credentials = $this->flow()->login($onAuth, $onPrompt, $onProgress, $signal, $onSelect);
 
         if ($credentials !== null && $this->onLogin !== null) {
             ($this->onLogin)($credentials);
@@ -69,7 +65,7 @@ final class LazyAntigravityOauth implements OauthFlow
     #[\Override]
     public function refresh(OauthCredentials $credentials): OauthCredentials
     {
-        return $this->flow(true)->refresh($credentials);
+        return $this->flow()->refresh($credentials);
     }
 
     #[\Override]
@@ -79,9 +75,9 @@ final class LazyAntigravityOauth implements OauthFlow
         return AntigravityOauth::keyFor($credentials);
     }
 
-    private function flow(bool $allowDefault): AntigravityOauth
+    private function flow(): AntigravityOauth
     {
-        [$id, $secret] = ($this->client)($allowDefault);
+        [$id, $secret] = ($this->client)();
 
         return new AntigravityOauth($id, $secret);
     }

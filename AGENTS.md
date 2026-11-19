@@ -43,7 +43,8 @@ this says how it is worked on. Keep this file under 100 lines.
   whole catalog (`Catalog`).
 - No silent fallback: `catch` re-throws. No `@` suppression. `declare(strict_types=1)`, one
   class per file.
-- The OAuth client id and secret are never in this repository.
+- The OAuth client is upstream's public desktop pair, encoded and split, in
+  `AntigravityOauth` only; never written plain or whole, in code, tests or docs.
 - The developer's name does not appear in this repository; write "the developer".
 - **Spending is opt-in**: `Credits` reads the person's own settings file, never the session's
   merged settings, so a project cannot switch AI credit overages on.

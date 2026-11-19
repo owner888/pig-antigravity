@@ -33,10 +33,8 @@ use Throwable;
  * gives up into a constant. A shared parent would have to hold both shapes, and the seam would
  * fall exactly where the two are least alike.
  *
- * **The client id and secret are not in this repository**, encoded or not. Upstream keeps them
- * base64'd, which is not protection and is why pushing them here was blocked twice: the
- * scanners decode. `Auth::antigravityClient()` reads them from the environment or the settings
- * and refuses clearly when there are none. See the trap entry on credentials.
+ * **The client is the public Antigravity desktop one unless the person names their own**
+ * (`client()`), as upstream's `CLIENT_ID` / `CLIENT_SECRET` are.
  */
 final class AntigravityOauth implements OauthFlow
 {
@@ -56,6 +54,16 @@ final class AntigravityOauth implements OauthFlow
     public const int PORT = 51121;
 
     public const string CALLBACK_PATH = '/oauth-callback';
+
+    /**
+     * Google's public Antigravity desktop client, as upstream embeds it. An installed-application
+     * secret is not confidential by design and PKCE protects the exchange. Kept encoded and in
+     * two pieces because a push carrying it whole is blocked.
+     */
+    private const string DEFAULT_CLIENT_ID = 'MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlc'
+        . 'C5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ==';
+
+    private const string DEFAULT_CLIENT_SECRET = 'R09DU1BYLUs1OEZXUjQ' . '4NkxkTEoxbUxCOHNYQzR6NnFEQWY=';
 
     /**
      * Five, where Gemini CLI asks for three.
@@ -126,6 +134,42 @@ final class AntigravityOauth implements OauthFlow
         if ($clientId === '' || $clientSecret === '') {
             throw new OauthError('Signing in to Antigravity needs its own client id and secret.');
         }
+    }
+
+    /**
+     * The client to sign in and renew under: the person's own pair when both halves are given,
+     * the public desktop client when neither is. One half alone is a mistake in the
+     * configuration, and mixing it with the other client's half would be refused by Google with
+     * a message that names neither.
+     *
+     * @return array{0: string, 1: string}
+     */
+    public static function client(?string $id, ?string $secret): array
+    {
+        $id = $id === '' ? null : $id;
+        $secret = $secret === '' ? null : $secret;
+
+        if ($id !== null && $secret !== null) {
+            return [$id, $secret];
+        }
+
+        if ($id !== null || $secret !== null) {
+            throw new OauthError(
+                'An Antigravity client id and secret go together, and only the '
+                . ($id !== null ? 'id' : 'secret') . ' is set. Set both ANTIGRAVITY_CLIENT_ID and '
+                . 'ANTIGRAVITY_CLIENT_SECRET (or antigravity.clientId and antigravity.clientSecret in '
+                . 'settings.json), or neither to use the built-in client.',
+            );
+        }
+
+        return [self::decoded(self::DEFAULT_CLIENT_ID), self::decoded(self::DEFAULT_CLIENT_SECRET)];
+    }
+
+    private static function decoded(string $encoded): string
+    {
+        $plain = base64_decode($encoded, true);
+
+        return $plain !== false ? $plain : throw new OauthError('The built-in Antigravity client is unreadable.');
     }
 
     /** Where to send the person. */

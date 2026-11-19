@@ -12,6 +12,7 @@ use Pig\Ai\Extension\OauthFlow;
 use Pig\Ai\Extension\ProviderRegistry;
 use Pig\Ai\Extension\StreamApi;
 use Pig\Ai\Models;
+use Pig\Ai\Utils\Oauth\OauthError;
 use Pig\CodingAgent\Auth;
 use Pig\CodingAgent\Extensions\ExtensionApi;
 use Pig\CodingAgent\Extensions\ExtensionLoader;
@@ -415,29 +416,31 @@ final class AntigravityExtensionTest extends TestCase
         $this->assertNull(Auth::signIn('antigravity'));
     }
 
-    public function testTheExtensionLoadsWithoutTheClientPairAndRefusesOnlyAtSignIn(): void
+    public function testTheExtensionLoadsWithHalfAClientPairAndRefusesOnlyAtSignIn(): void
     {
-        // The sign-in row has to be there to say what is missing; refusing at load would make the
+        // The sign-in row has to be there to say what is wrong; refusing at load would make the
         // provider silently absent, which reads as the list being broken.
-        putenv('ANTIGRAVITY_CLIENT_ID');
+        putenv('ANTIGRAVITY_CLIENT_ID=only-the-id');
         putenv('ANTIGRAVITY_CLIENT_SECRET');
-
-        [, $errors] = $this->loadTheExtension();
-        $this->assertSame([], $errors);
-
-        $flow = Auth::signIn('antigravity');
-        $this->assertInstanceOf(OauthFlow::class, $flow);
 
         $problem = null;
 
         try {
+            [, $errors] = $this->loadTheExtension();
+            $this->assertSame([], $errors);
+
+            $flow = Auth::signIn('antigravity');
+            $this->assertInstanceOf(OauthFlow::class, $flow);
+
             $flow->login(static function (): void {
             }, static fn (): ?string => null);
-        } catch (\Throwable $caught) {
+        } catch (OauthError $caught) {
             $problem = $caught;
+        } finally {
+            putenv('ANTIGRAVITY_CLIENT_ID');
         }
 
         $this->assertNotNull($problem);
-        $this->assertStringContainsString('ANTIGRAVITY_CLIENT_ID', $problem->getMessage());
+        $this->assertStringContainsString('only the id is set', $problem->getMessage());
     }
 }

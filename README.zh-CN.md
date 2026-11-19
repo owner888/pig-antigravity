@@ -16,7 +16,7 @@ pig install git:github.com/owner888/pig-antigravity
 
 这不是 Google 官方集成。请求按 Antigravity CLI 的方式发往 Google 的 Code Assist 后端，Google 可能因此限制或停用以这种方式使用订阅的账号。请用你承受得起失去访问权的账号。
 
-OAuth 客户端不在本仓库里。登录前先在环境变量里设置 `ANTIGRAVITY_CLIENT_ID` 和 `ANTIGRAVITY_CLIENT_SECRET`，或在 pig 的 `settings.json` 里设置 `antigravity.clientId` 和 `antigravity.clientSecret`。
+登录默认使用 Google 公开的 Antigravity 桌面 OAuth 客户端，与 pi-antigravity 相同，无需事先配置。要用自己的客户端，在环境变量里同时设置 `ANTIGRAVITY_CLIENT_ID` 和 `ANTIGRAVITY_CLIENT_SECRET`，或在 pig 的 `settings.json` 里同时设置 `antigravity.clientId` 和 `antigravity.clientSecret`。
 
 ## 登录
 
@@ -61,7 +61,7 @@ pig --model antigravity/gemini-3.8-flash
 
 | 变量 | |
 | --- | --- |
-| `ANTIGRAVITY_CLIENT_ID`、`ANTIGRAVITY_CLIENT_SECRET` | OAuth 客户端（见上） |
+| `ANTIGRAVITY_CLIENT_ID`、`ANTIGRAVITY_CLIENT_SECRET` | 用自己的 OAuth 客户端替代内置的（见上） |
 | `ANTIGRAVITY_USER_AGENT` | 替换请求携带的 Antigravity CLI `User-Agent`。后端只对较新的 CLI 版本展示较新的模型 |
 | `ANTIGRAVITY_BASE_URL` | 只向这一个 `https://*.googleapis.com` 端点询问目录，而不是默认的三个 |
 | `ANTIGRAVITY_CATALOG_REFRESH_INTERVAL_MS` | 已保存的目录复用多久（默认四小时；`0` 表示每次都问） |

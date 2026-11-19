@@ -16,7 +16,7 @@ No Composer dependencies. Antigravity was bundled with pig until it became this 
 
 This is not an official Google integration. Requests go to Google's Code Assist backend the way the Antigravity CLI sends them, and Google may limit or suspend an account that uses a subscription this way. Use an account you can afford to lose access with.
 
-The OAuth client is not in this repository. Set `ANTIGRAVITY_CLIENT_ID` and `ANTIGRAVITY_CLIENT_SECRET` in the environment, or `antigravity.clientId` and `antigravity.clientSecret` in pig's `settings.json`, before signing in.
+Sign-in uses Google's public Antigravity desktop OAuth client, as pi-antigravity does; nothing has to be set up first. To use your own, set both `ANTIGRAVITY_CLIENT_ID` and `ANTIGRAVITY_CLIENT_SECRET` in the environment, or both `antigravity.clientId` and `antigravity.clientSecret` in pig's `settings.json`.
 
 ## Signing in
 
@@ -61,7 +61,7 @@ Signing in again with another Google account keeps the first one. A hard quota w
 
 | Variable | |
 | --- | --- |
-| `ANTIGRAVITY_CLIENT_ID`, `ANTIGRAVITY_CLIENT_SECRET` | The OAuth client (see above) |
+| `ANTIGRAVITY_CLIENT_ID`, `ANTIGRAVITY_CLIENT_SECRET` | Your own OAuth client instead of the built-in one (see above) |
 | `ANTIGRAVITY_USER_AGENT` | Replaces the Antigravity CLI `User-Agent` requests carry. The backend shows newer models only to newer CLI versions |
 | `ANTIGRAVITY_BASE_URL` | One `https://*.googleapis.com` endpoint for the catalog instead of the usual three |
 | `ANTIGRAVITY_CATALOG_REFRESH_INTERVAL_MS` | How long a stored catalog is reused (default four hours; `0` asks every time) |

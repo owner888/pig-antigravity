@@ -82,7 +82,7 @@ final class AntigravityOauthTest extends TestCase
 
     // ---- Antigravity ----------------------------------------------------------------------
 
-    /** Made-up credentials: this repository does not hold Antigravity's, and does not need to. */
+    /** Made-up credentials: no test needs the real client. */
     private function antigravity(string $url, ?CallbackServer $server = null): AntigravityOauth
     {
         return new AntigravityOauth('ag-client-id', 'ag-client-secret', new HttpClient(), $server, $url);
@@ -94,6 +94,35 @@ final class AntigravityOauthTest extends TestCase
             OauthError::class,
             static fn (): AntigravityOauth => new AntigravityOauth('', ''),
             'client id and secret',
+        );
+    }
+
+    public function testTheClientIsThePersonsOwnPairWhenBothHalvesAreSet(): void
+    {
+        $this->assertSame(['my-id', 'my-secret'], AntigravityOauth::client('my-id', 'my-secret'));
+    }
+
+    public function testTheClientIsTheBuiltInOneWhenNoneIsSet(): void
+    {
+        foreach ([[null, null], ['', '']] as [$id, $secret]) {
+            [$builtInId, $builtInSecret] = AntigravityOauth::client($id, $secret);
+
+            $this->assertStringEndsWith('.apps.googleusercontent.com', $builtInId);
+            $this->assertStringStartsWith('GOCSPX-', $builtInSecret);
+        }
+    }
+
+    public function testHalfAClientPairIsRefusedRatherThanMixedWithTheBuiltInOne(): void
+    {
+        $this->assertThrows(
+            OauthError::class,
+            static fn (): array => AntigravityOauth::client('my-id', null),
+            'only the id is set',
+        );
+        $this->assertThrows(
+            OauthError::class,
+            static fn (): array => AntigravityOauth::client('', 'my-secret'),
+            'only the secret is set',
         );
     }
 
@@ -138,7 +167,6 @@ final class AntigravityOauthTest extends TestCase
         $this->assertStringContainsString('grant_type=authorization_code', $sent);
         $this->assertStringContainsString('code=the-code', $sent);
         $this->assertStringContainsString('code_verifier=the-verifier', $sent);
-        // Handed in rather than held here: this repository does not ship them.
         $this->assertStringContainsString('client_id=ag-client-id', $sent);
         $this->assertStringContainsString('client_secret=ag-client-secret', $sent);
 
