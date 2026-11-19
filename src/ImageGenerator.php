@@ -34,7 +34,7 @@ use Throwable;
  *
  * What it sends is what pi-antigravity's image command sends: one `streamGenerateContent` envelope
  * per attempt, the prompt (and any reference images) as the user turn, an `imageConfig` with the
- * aspect ratio, tried on each of `QuotaClient::ENDPOINTS` and then on the next model of
+ * aspect ratio, tried on each of `Discovery::endpointCandidates()` and then on the next model of
  * `MODEL_FALLBACKS` after a 404. The model that answered is the result's `model`, so a fallback is
  * never silent. A 429 ends it at that one request (`RateLimited`), as it does the chat protocol
  * (`AntigravityApi::send()`).
@@ -70,7 +70,7 @@ final class ImageGenerator implements ProviderImages
         'You are an AI image generator. Generate images based on user descriptions. Focus on creating high-quality, visually appealing images that match the user\'s request.';
 
     /**
-     * @param string|null $endpoint the one host to try in place of `QuotaClient::ENDPOINTS` — for tests
+     * @param string|null $endpoint the one host to try in place of `Discovery::endpointCandidates()` — for tests
      */
     public function __construct(
         private readonly ?HttpClient $http = null,
@@ -260,7 +260,7 @@ final class ImageGenerator implements ProviderImages
     private function request(string $token, string $project, string $model, string $prompt, array $references, string $ratio, ImagesOptions $options): array
     {
         $modelsToTry = array_values(array_unique([$model, ...self::MODEL_FALLBACKS]));
-        $candidates = $this->endpoint !== null ? [$this->endpoint] : QuotaClient::ENDPOINTS;
+        $candidates = $this->endpoint !== null ? [$this->endpoint] : Discovery::endpointCandidates();
         $http = $this->http ?? new HttpClient(60.0);
         $parts = [['text' => $prompt]];
 

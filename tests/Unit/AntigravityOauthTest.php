@@ -126,7 +126,7 @@ final class AntigravityOauthTest extends TestCase
         );
     }
 
-    public function testAntigravityAsksForItsOwnFiveScopes(): void
+    public function testAntigravityAsksForPiAntigravitysSixScopes(): void
     {
         $pkce = Pkce::create();
         $url = $this->antigravity('http://unused')
@@ -136,12 +136,16 @@ final class AntigravityOauthTest extends TestCase
 
         $scopes = explode(' ', $query['scope']);
 
-        // Five, not Gemini CLI's three. `cclog` and `experimentsandconfigs` are the two extra
-        // and they are what the sandbox deployment checks for — a token minted with Gemini
-        // CLI's scopes reaches the same endpoint and is refused there.
-        $this->assertCount(5, $scopes);
-        $this->assertContains('https://www.googleapis.com/auth/cclog', $scopes);
-        $this->assertContains('https://www.googleapis.com/auth/experimentsandconfigs', $scopes);
+        // pi-antigravity's `SCOPES`, in its order: a sign-in that asks for a different set under
+        // the same client stands apart from every other one.
+        $this->assertSame([
+            'https://www.googleapis.com/auth/aicode',
+            'https://www.googleapis.com/auth/cloud-platform',
+            'https://www.googleapis.com/auth/userinfo.email',
+            'https://www.googleapis.com/auth/userinfo.profile',
+            'https://www.googleapis.com/auth/cclog',
+            'https://www.googleapis.com/auth/experimentsandconfigs',
+        ], $scopes);
         $this->assertSame('ag-client-id', $query['client_id']);
         $this->assertSame('http://localhost:51121/oauth-callback', $query['redirect_uri']);
         $this->assertSame('offline', $query['access_type']);
@@ -179,6 +183,9 @@ final class AntigravityOauthTest extends TestCase
         $url = $this->serve(['email' => 'me@example.com']);
 
         $this->assertSame('me@example.com', $this->onTheLoop(fn (): ?string => $this->antigravity($url)->email('ya29.a')));
+        // The token and nothing that says who is asking, as upstream's `getUserEmail()`.
+        $this->assertStringNotContainsStringIgnoringCase('google-api-nodejs-client', $this->server->received());
+        $this->assertStringNotContainsStringIgnoringCase('client-metadata', $this->server->received());
     }
 
     public function testAnEmailGoogleWillNotSayIsNotAFailure(): void
@@ -268,8 +275,15 @@ final class AntigravityOauthTest extends TestCase
             $this->onTheLoop(fn (): string => $this->antigravity($url)->project('ya29.a')),
         );
 
-        // Not Gemini CLI's headers: the sandbox checks who is asking.
-        $this->assertStringContainsString('v1internal:loadCodeAssist', $this->server->received());
+        // Asked as the Antigravity CLI asks, and with nothing of Gemini CLI's.
+        $sent = $this->server->received();
+        $this->assertStringContainsString('v1internal:loadCodeAssist', $sent);
+        $this->assertStringContainsStringIgnoringCase('user-agent: ' . \PigAntigravity\AntigravityCli::userAgent(), $sent);
+        $this->assertStringContainsString('{"metadata":{"ideType":"ANTIGRAVITY"}}', $sent);
+
+        foreach (['google-api-nodejs-client', 'x-goog-api-client', 'client-metadata', 'IDE_UNSPECIFIED'] as $geminiCli) {
+            $this->assertStringNotContainsStringIgnoringCase($geminiCli, $sent);
+        }
     }
 
     public function testAntigravityReadsTheProjectWhenItComesBackAsAnObject(): void
@@ -284,17 +298,50 @@ final class AntigravityOauthTest extends TestCase
         );
     }
 
-    public function testAntigravityFallsBackToItsConstantRatherThanFailing(): void
+    public function testWithNoProjectFoundTheAccountGetsItsOwnDefaultIdRatherThanASharedOne(): void
     {
         $url = $this->serve('nope', status: 403, reason: 'Forbidden');
 
-        // Every discovery failure is swallowed on purpose — a 403 on the production endpoint is
-        // the normal case for an account that was always going to use the sandbox. Unlike
-        // Gemini CLI's, nothing is provisioned and nothing is waited for.
+        // Every discovery failure is swallowed on purpose, and nothing is provisioned or waited
+        // for. The ids are pi-antigravity's `stableProjectId()`, computed by it for these seeds.
         $this->assertSame(
-            AntigravityOauth::FALLBACK_PROJECT,
-            $this->onTheLoop(fn (): string => $this->antigravity($url)->project('ya29.a')),
+            '88a6f22d-279f-55e2-bb88-5aedcc8b764b',
+            $this->onTheLoop(fn (): string => $this->antigravity($url)->project('ya29.a', null, 'me@example.com')),
         );
+        $this->assertSame(3, $this->server->connections(), 'each of the three endpoints, once');
+        $this->assertSame('5cbbac7c-3afc-5af4-bd2d-c3fc22ff9d54', AntigravityOauth::defaultProjectId('antigravity-default'));
+
+        putenv('ANTIGRAVITY_PROJECT_ID= my-own-project ');
+
+        try {
+            $this->assertSame('my-own-project', AntigravityOauth::defaultProjectId('me@example.com'));
+        } finally {
+            putenv('ANTIGRAVITY_PROJECT_ID');
+        }
+    }
+
+    public function testAnAnswerThatNamesNoProjectIsFollowedByTheListOfThem(): void
+    {
+        // pi-antigravity's `loadCodeAssistUncached()`: the first endpoint that answers, and when
+        // it names none, `listCloudAICompanionProjects`.
+        $reply = static fn (string $body): array => ["HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: " . strlen($body) . "\r\nconnection: close\r\n\r\n" . $body];
+        $url = $this->server->startSequence([$reply('{"currentTier":{"id":"free-tier"}}'), $reply('{"cloudaicompanionProjects":[{"projectId":"listed-project"}]}')]);
+
+        $this->assertSame('listed-project', $this->onTheLoop(fn (): string => $this->antigravity($url)->project('ya29.a')));
+        $this->assertSame(2, $this->server->connections());
+        $this->assertStringContainsString('v1internal:listCloudAICompanionProjects', $this->server->received());
+        $this->assertStringEndsWith("\r\n\r\n{}", $this->server->received());
+    }
+
+    public function testAProjectIsReadUnderAnyOfTheNamesGoogleGivesIt(): void
+    {
+        // pi-antigravity's `extractProjectId()`.
+        $this->assertSame('a', AntigravityOauth::extractProjectId(['antigravityProjectId' => 'a', 'project' => 'b']));
+        $this->assertSame('b', AntigravityOauth::extractProjectId(['cloudaicompanionProject' => ['id' => 'b']]));
+        $this->assertSame('c', AntigravityOauth::extractProjectId(['projects' => [['nothing' => 1], ['projectId' => 'c']]]));
+        $this->assertSame('d', AntigravityOauth::extractProjectId(['projectIds' => ['', 'd']]));
+        $this->assertNull(AntigravityOauth::extractProjectId(['project' => '', 'projects' => 'nope']));
+        $this->assertNull(AntigravityOauth::extractProjectId('nope'));
     }
 
     public function testA429WhileLookingForAProjectEndsTheSignInRatherThanAskingTheOtherEndpoint(): void

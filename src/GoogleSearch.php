@@ -367,11 +367,7 @@ final class GoogleSearch
             throw new RuntimeException('Search query is required.');
         }
 
-        $candidates = $endpoints ?? [
-            'https://daily-cloudcode-pa.googleapis.com',
-            'https://daily-cloudcode-pa.sandbox.googleapis.com',
-            'https://cloudcode-pa.googleapis.com',
-        ];
+        $candidates = $endpoints ?? Discovery::endpointCandidates();
 
         // `antigravityHeaders(creds.token)`, the CLI's User-Agent included.
         $headers = Discovery::headers($token);

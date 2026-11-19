@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PigAntigravity;
 
+use Closure;
 use Pig\Ai\Timestamp;
 use Pig\Ai\Utils\Oauth\OauthCredentials;
 
@@ -49,6 +50,9 @@ final class Accounts
 
     /** The only version this reads. Upstream refuses anything else outright, and so does this. */
     private const int VERSION = 1;
+
+    /** pi-antigravity's `REFRESH_SKEW_MS`: a token with less than this left is renewed before use. */
+    private const int REFRESH_SKEW_MS = 5 * 60 * 1000;
 
     /** @var array<string, array<string, mixed>> accountId => the whole entry, kept as it was read */
     private array $accounts = [];
@@ -123,12 +127,52 @@ final class Accounts
     public function remove(string $id): void
     {
         if (isset($this->accounts[$id])) {
+            $successor = $this->successorOf($id);
             unset($this->accounts[$id]);
             if ($this->active === $id) {
-                $this->active = array_key_first($this->accounts);
+                $this->active = $successor;
             }
             $this->save();
         }
+    }
+
+    /** The account that becomes the active one when $id is removed: none unless $id is active. */
+    public function successorOf(string $id): ?string
+    {
+        if ($this->active !== $id) {
+            return null;
+        }
+
+        foreach (array_keys($this->accounts) as $other) {
+            if ($other !== $id) {
+                return $other;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * pi-antigravity's `ensureFresh()`, which it runs on an account before making it the active
+     * one: a token with less than `REFRESH_SKEW_MS` left is renewed there and then, and a
+     * renewal that fails leaves everything as it was.
+     *
+     * @param Closure(OauthCredentials): OauthCredentials $refresh
+     * @return string|null the account's id afterwards, or null when there is no such account
+     */
+    public function ensureFresh(string $id, Closure $refresh): ?string
+    {
+        $credentials = isset($this->accounts[$id]) ? self::credentials($this->accounts[$id]) : null;
+
+        if ($credentials === null) {
+            return null;
+        }
+
+        if ($credentials->access !== '' && $credentials->expires > Timestamp::nowMs() + self::REFRESH_SKEW_MS) {
+            return $id;
+        }
+
+        return $this->renewed($credentials, $refresh($credentials)) ?? $id;
     }
 
     /**
@@ -138,6 +182,20 @@ final class Accounts
      */
     public function rotateNext(): ?OauthCredentials
     {
+        $nextId = $this->nextId();
+
+        if ($nextId === null) {
+            return null;
+        }
+
+        $this->activate($nextId);
+
+        return $this->active();
+    }
+
+    /** The account `rotateNext()` would switch to, or null with one account or none. */
+    public function nextId(): ?string
+    {
         $keys = array_keys($this->accounts);
         $total = count($keys);
 
@@ -146,16 +204,9 @@ final class Accounts
         }
 
         $currentIndex = array_search($this->active, $keys, true);
-        $nextIndex = $currentIndex === false ? 0 : ($currentIndex + 1) % $total;
-        $nextId = $keys[$nextIndex];
+        $nextId = $keys[$currentIndex === false ? 0 : ($currentIndex + 1) % $total];
 
-        if ($nextId === $this->active) {
-            return null;
-        }
-
-        $this->activate($nextId);
-
-        return $this->active();
+        return $nextId === $this->active ? null : $nextId;
     }
 
     /** How many sign-ins are in the store, which is the only thing `/login` would want to say. */
@@ -172,13 +223,15 @@ final class Accounts
      * accounts were added in survives. A refresh nothing matches is left alone rather than added
      * — pig renewing a token is not pig signing somebody in, and a store this has never seen is
      * one the extension is entitled to own.
+     *
+     * @return string|null the id the account is filed under now, or null when nothing matched
      */
-    public function renewed(OauthCredentials $previous, OauthCredentials $next): void
+    public function renewed(OauthCredentials $previous, OauthCredentials $next): ?string
     {
         $existing = $this->find($previous);
 
         if ($existing === null || $this->path === null) {
-            return;
+            return null;
         }
 
         $id = self::idFor($next) ?? $existing;
@@ -203,6 +256,8 @@ final class Accounts
         }
 
         $this->save();
+
+        return $id;
     }
 
     /**

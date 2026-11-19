@@ -64,6 +64,7 @@ Signing in again with another Google account keeps the first one. Switching betw
 | Variable | |
 | --- | --- |
 | `ANTIGRAVITY_CLIENT_ID`, `ANTIGRAVITY_CLIENT_SECRET` | Your own OAuth client instead of the built-in one (see above) |
+| `ANTIGRAVITY_PROJECT_ID` | The Cloud project id a sign-in is given when Google names none, instead of one derived from the account's email |
 | `ANTIGRAVITY_USER_AGENT` | Replaces the Antigravity CLI `User-Agent` requests carry. The backend shows newer models only to newer CLI versions |
 | `ANTIGRAVITY_BASE_URL` | One `https://*.googleapis.com` endpoint for the catalog instead of the usual three |
 | `ANTIGRAVITY_CATALOG_REFRESH_INTERVAL_MS` | How long a stored catalog is reused (default four hours; `0` asks every time) |

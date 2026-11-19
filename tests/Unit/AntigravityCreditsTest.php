@@ -139,6 +139,34 @@ final class AntigravityCreditsTest extends TestCase
         $this->assertNull(QuotaClient::parseCredits('nope'));
     }
 
+    public function testAUsageReadIsPiAntigravitysThreeRequestsUnderItsProjects(): void
+    {
+        // `fetchAccountUsage()`: loadCodeAssist, the quota summary, then the catalog under the
+        // project the credential carries; the project reported is the one the first answer names.
+        $reply = static function (array $answer): array {
+            $body = (string) json_encode($answer);
+
+            return ["HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " . strlen($body) . "\r\n\r\n{$body}"];
+        };
+        $server = new CannedServer();
+        $url = $server->startSequence([
+            $reply(['cloudaicompanionProject' => ['id' => 'discovered-project'], 'currentTier' => ['id' => 'free-tier', 'name' => 'Free']]),
+            $reply(['groups' => []]),
+            $reply(['models' => ['gemini-3.8-flash' => ['displayName' => 'Gemini 3.8 Flash', 'quotaInfo' => ['remainingFraction' => 0.5]]], 'defaultAgentModelId' => 'gemini-3.8-flash']),
+        ]);
+
+        $usage = Async::run(static fn (): array => (new QuotaClient(endpoint: rtrim($url, '/')))->fetchUsage('ya29.a', 'stored-project'));
+
+        $this->assertSame(3, $server->connections());
+        $this->assertSame('discovered-project', $usage['projectId']);
+        $this->assertSame('Free (free-tier)', $usage['planLabel']);
+        $this->assertSame('gemini-3.8-flash', $usage['models'][0]['modelId']);
+        $this->assertSame('gemini-3.8-flash', $usage['defaultAgentModelId']);
+        // The last request: the catalog, asked under the credential's project.
+        $this->assertStringContainsString('/v1internal:fetchAvailableModels', $server->received());
+        $this->assertStringContainsString('{"project":"stored-project"}', $server->received());
+    }
+
     public function testA429EndsAUsageReadAtThatOneRequest(): void
     {
         // Three requests make a usage read, each on every endpoint; the first 429 is the last.

@@ -64,6 +64,7 @@ pig --model antigravity/gemini-3.8-flash
 | 变量 | |
 | --- | --- |
 | `ANTIGRAVITY_CLIENT_ID`、`ANTIGRAVITY_CLIENT_SECRET` | 用自己的 OAuth 客户端替代内置的（见上） |
+| `ANTIGRAVITY_PROJECT_ID` | Google 没有给出 Cloud 项目时，登录所用的项目 id；不设则由账号邮箱推算出一个 |
 | `ANTIGRAVITY_USER_AGENT` | 替换请求携带的 Antigravity CLI `User-Agent`。后端只对较新的 CLI 版本展示较新的模型 |
 | `ANTIGRAVITY_BASE_URL` | 只向这一个 `https://*.googleapis.com` 端点询问目录，而不是默认的三个 |
 | `ANTIGRAVITY_CATALOG_REFRESH_INTERVAL_MS` | 已保存的目录复用多久（默认四小时；`0` 表示每次都问） |

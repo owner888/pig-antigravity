@@ -252,6 +252,77 @@ final class AntigravityAccountsTest extends TestCase
         self::assertNull($this->accounts()->rotateNext());
     }
 
+    public function testAnAccountAboutToBecomeActiveIsRenewedFirstWhenItsTokenIsDue(): void
+    {
+        // pi-antigravity's `ensureFresh()`: less than five minutes left, or no token, is renewed
+        // at the switch; a token with longer left is not.
+        $soon = (int) (microtime(true) * 1000) + 60_000;
+        $this->write([
+            'version' => 1,
+            'activeAccountId' => 'first@example',
+            'accounts' => [
+                'first@example' => $this->account('first@example'),
+                'second@example' => [...$this->account('second@example'), 'expires' => $soon],
+            ],
+        ]);
+
+        $accounts = $this->accounts();
+        $asked = [];
+        $refresh = static function (OauthCredentials $credentials) use (&$asked): OauthCredentials {
+            $asked[] = $credentials->refresh;
+
+            return new OauthCredentials($credentials->refresh, 'renewed-access', 9_000_000_000_000, null, $credentials->projectId);
+        };
+
+        self::assertSame('first@example', $accounts->ensureFresh('first@example', $refresh));
+        self::assertSame([], $asked);
+
+        self::assertSame('second@example', $accounts->ensureFresh('second@example', $refresh));
+        self::assertSame(['refresh-second@example'], $asked);
+        self::assertSame('first@example', $accounts->activeId(), 'renewing is not switching');
+        self::assertSame('renewed-access', $this->accounts()->accounts()['second@example']['access']);
+        self::assertSame('second@example', $this->accounts()->accounts()['second@example']['email']);
+
+        self::assertNull($accounts->ensureFresh('nobody@example', $refresh));
+
+        // A renewal that fails leaves the store as it was, and says so.
+        $this->write([
+            'version' => 1,
+            'activeAccountId' => 'first@example',
+            'accounts' => ['first@example' => $this->account('first@example'), 'second@example' => [...$this->account('second@example'), 'expires' => $soon]],
+        ]);
+
+        try {
+            $this->accounts()->ensureFresh('second@example', static fn (): OauthCredentials => throw new \RuntimeException('refused'));
+            self::fail('renewed');
+        } catch (\RuntimeException $error) {
+            self::assertSame('refused', $error->getMessage());
+        }
+
+        self::assertSame('access-second@example', $this->accounts()->accounts()['second@example']['access']);
+    }
+
+    public function testTheAccountThatTakesOverFromARemovedOneIsKnownBeforeTheRemoval(): void
+    {
+        $this->write([
+            'version' => 1,
+            'activeAccountId' => 'first@example',
+            'accounts' => ['first@example' => $this->account('first@example'), 'second@example' => $this->account('second@example')],
+        ]);
+
+        $accounts = $this->accounts();
+
+        self::assertNull($accounts->successorOf('second@example'), 'not the active one: nobody takes over');
+        self::assertSame('second@example', $accounts->successorOf('first@example'));
+        self::assertSame('second@example', $accounts->nextId());
+
+        $accounts->remove('first@example');
+
+        self::assertSame('second@example', $accounts->activeId());
+        self::assertNull($accounts->successorOf('second@example'), 'the last one has no successor');
+        self::assertNull($accounts->nextId());
+    }
+
     public function testAnAccountIsFoundByItsEmailWhenTheRefreshTokenHasChanged(): void
     {
         // Upstream's `findAccount` matches on either, case-folded and trimmed: a store written

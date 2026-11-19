@@ -4,6 +4,15 @@ What changed, newest first, in pig's format: `## Unreleased` while working, `## 
 at release. The version lives in the git tag only, and follows the pi-antigravity release the port
 is in step with.
 
+## [0.14.3] - 2026-11-19
+
+### Changed
+
+- Signing in asks for pi-antigravity's six scopes (`aicode` was missing) and looks for the Cloud project as the Antigravity CLI does — its `User-Agent` and `ideType: ANTIGRAVITY` — where it used to send Gemini CLI's headers; the email lookup and the token requests send what pi-antigravity's do and nothing else. An account already signed in keeps its five scopes until it signs in again.
+- The Cloud project is looked for as pi-antigravity looks: on its three endpoints in its order (there were two, in another), then `listCloudAICompanionProjects` when the answer names none, and under any of the names Google gives a project. An account with none gets an id of its own, made from its email (or `ANTIGRAVITY_PROJECT_ID`), where every such account used to be given the same project, `rising-fact-p41fc`. An account already signed in keeps the project it has until it signs in again.
+- `/antigravity.usage`, `/antigravity.models` and the accounts panel send pi-antigravity's requests: its endpoints in its order, the model list asked of every endpoint under the project the account carries, and the project shown read under any of the names Google gives it. A usage read now fails when no endpoint returns a model list, as upstream's does, where it used to show the rest without the models. Image generation and Google Search use the same endpoint order too, and all of them honour `ANTIGRAVITY_BASE_URL`.
+- Switching account (`/antigravity.accounts switch` and `rotate`, the panel's buttons, and removing the active account) renews the token of the account being switched to there and then when it has under five minutes left, as pi-antigravity does, where the renewal used to wait for the next request. A renewal that fails leaves the switch or the removal unmade, and says why.
+
 ## [0.14.2] - 2026-11-19
 
 ### Changed

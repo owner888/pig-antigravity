@@ -21,7 +21,7 @@ use Throwable;
  *
  * Upstream's `utils/oauth/google-antigravity.ts`. The same OAuth protocol as its Gemini CLI
  * sibling had, and a different
- * everything else: its own OAuth client, five scopes instead of three, port 51121 instead of
+ * everything else: its own OAuth client, six scopes instead of three, port 51121 instead of
  * 8085, and a sandbox endpoint whose `User-Agent` check is load-bearing. What it buys is the
  * seven models in `Models::ANTIGRAVITY_MODELS` — two of Anthropic's, three Geminis and an
  * open-weights one, none of which Gemini CLI offers.
@@ -66,13 +66,15 @@ final class AntigravityOauth implements OauthFlow
     private const string DEFAULT_CLIENT_SECRET = 'R09DU1BYLUs1OEZXUjQ' . '4NkxkTEoxbUxCOHNYQzR6NnFEQWY=';
 
     /**
-     * Five, where Gemini CLI asks for three.
+     * pi-antigravity's `SCOPES`, in its order: six, where Gemini CLI asks for three. The same
+     * set as every other sign-in under this client, so that this one does not stand apart.
      *
      * `cclog` and `experimentsandconfigs` are the two extra, and they are what the sandbox
      * deployment checks for — a token minted with Gemini CLI's scopes reaches the same endpoint
      * and is refused there.
      */
     public const array SCOPES = [
+        'https://www.googleapis.com/auth/aicode',
         'https://www.googleapis.com/auth/cloud-platform',
         'https://www.googleapis.com/auth/userinfo.email',
         'https://www.googleapis.com/auth/userinfo.profile',
@@ -80,43 +82,11 @@ final class AntigravityOauth implements OauthFlow
         'https://www.googleapis.com/auth/experimentsandconfigs',
     ];
 
-    /**
-     * Where a project is looked for, in this order: production first, then the sandbox.
-     *
-     * Upstream's order, which looks backwards for a sandbox-only provider and is not: a person
-     * who already has a Code Assist project should spend against that one.
-     */
-    public const array DISCOVERY_ENDPOINTS = [
-        'https://cloudcode-pa.googleapis.com',
-        'https://daily-cloudcode-pa.sandbox.googleapis.com',
-    ];
-
-    /**
-     * The project used when neither endpoint names one.
-     *
-     * Upstream's constant, kept because without it a sign-in that otherwise worked ends with
-     * nothing to spend the token against. It is **somebody else's Google Cloud project** — not a
-     * secret, and not pig's either; it is what Antigravity itself falls back to. Worth knowing
-     * rather than discovering: requests that land on it are attributed to it.
-     */
-    public const string FALLBACK_PROJECT = 'rising-fact-p41fc';
-
     /** Renew this long before the token actually expires. Upstream's five minutes. */
     private const int MARGIN_MS = 5 * 60 * 1000;
 
-    /** Who the discovery call says it is. Not the same set the streaming endpoint wants. */
-    private const array DISCOVERY_HEADERS = [
-        'user-agent' => 'google-api-nodejs-client/9.15.1',
-        'x-goog-api-client' => 'google-cloud-sdk vscode_cloudshelleditor/0.1',
-        'client-metadata' => '{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}',
-    ];
-
-    /** @var array<string, mixed> */
-    private const array METADATA = [
-        'ideType' => 'IDE_UNSPECIFIED',
-        'platform' => 'PLATFORM_UNSPECIFIED',
-        'pluginType' => 'GEMINI',
-    ];
+    /** pi-antigravity's `loadCodeAssistUncached()` body. */
+    private const array METADATA = ['ideType' => 'ANTIGRAVITY'];
 
     /**
      * @param CallbackServer|null $server injectable because 51121 is a real port and a test
@@ -229,8 +199,8 @@ final class AntigravityOauth implements OauthFlow
             throw new OauthError('The stored antigravity credentials have no refresh token — sign in again.');
         }
 
-        // This flow always has a project — `project()` falls back to a constant rather than
-        // failing — so a stored credential without one was written by something else, and
+        // This flow always has a project — `project()` falls back to the account's own default
+        // id rather than failing — so a stored credential without one was written by something else, and
         // guessing which project it meant is not something to do with somebody's quota.
         return $this->renew(
             $credentials->refresh,
@@ -301,14 +271,17 @@ final class AntigravityOauth implements OauthFlow
         self::say($onProgress, 'Exchanging the code for tokens…');
         $tokens = $this->exchange($callback['code'], $pkce->verifier, $server->redirectUri());
 
+        // The email first: it is what the default project id is made from.
+        $email = $this->email($tokens['access']);
+
         self::say($onProgress, 'Looking for a Cloud project…');
 
         return new OauthCredentials(
             $tokens['refresh'],
             $tokens['access'],
             $tokens['expires'],
-            projectId: $this->project($tokens['access'], $onProgress),
-            email: $this->email($tokens['access']),
+            projectId: $this->project($tokens['access'], $onProgress, $email),
+            email: $email,
         );
     }
 
@@ -381,53 +354,145 @@ final class AntigravityOauth implements OauthFlow
     /**
      * The Cloud project to spend the token against.
      *
-     * **Nothing is provisioned and nothing is waited for**, which is the one real difference
-     * from how the Gemini CLI flow did it: two endpoints are asked, and if neither names a project the
-     * constant is used. Upstream's shape, and the reason it can be this simple is that
-     * Antigravity's sandbox does not require the caller's own project the way Code Assist
-     * proper does.
+     * pi-antigravity's sign-in: `loadCodeAssist()`, and when that names none,
+     * `defaultProjectId(email || "antigravity-default")` — an id of the account's own, where
+     * this used to fall back to one constant project shared by everybody it happened to.
+     * **Nothing is provisioned and nothing is waited for.**
      *
      * Every failure here is swallowed on purpose — a 404, a 403, a connection that never
-     * opened. The fallback is the answer to all of them, and an error would be an error about
-     * the *first* endpoint on an account that was always going to use the second.
+     * opened — except a 429, which ends the sign-in (the developer's choice, see `RateLimited`).
      *
      * @param Closure(string): void|null $onProgress
      */
-    public function project(string $accessToken, ?Closure $onProgress = null): string
+    public function project(string $accessToken, ?Closure $onProgress = null, ?string $email = null): string
     {
-        foreach (self::DISCOVERY_ENDPOINTS as $endpoint) {
-            try {
-                $loaded = $this->json(
-                    'POST',
-                    $this->endpoint($endpoint) . '/v1internal:loadCodeAssist',
-                    ['metadata' => self::METADATA],
-                    $accessToken,
-                );
-            } catch (Throwable $error) {
-                // The developer's choice: a 429 is not passed over for the other endpoint.
-                if ($error instanceof OauthError && $error->getCode() === 429) {
-                    throw $error;
-                }
+        $discovered = $this->loadCodeAssist($accessToken);
 
-                continue;
-            }
+        if ($discovered !== null) {
+            return $discovered;
+        }
 
-            $project = $loaded['cloudaicompanionProject'] ?? null;
+        self::say($onProgress, 'No project of your own — using this account\'s default.');
 
-            // A string on one endpoint and an object with an `id` on the other, which is
-            // Google's inconsistency rather than a guess about the shape.
-            if (is_string($project) && $project !== '') {
-                return $project;
-            }
+        return self::defaultProjectId($email ?? 'antigravity-default');
+    }
 
-            if (is_array($project) && is_string($project['id'] ?? null) && $project['id'] !== '') {
-                return $project['id'];
+    /**
+     * pi-antigravity's `loadCodeAssistUncached()`: each of `Discovery::endpointCandidates()` in
+     * turn until one answers; the project it names, or else what `listCloudAICompanionProjects`
+     * says. Asked as the Antigravity CLI asks (`Discovery::headers()`, upstream's
+     * `antigravityHeaders()`).
+     */
+    private function loadCodeAssist(string $accessToken): ?string
+    {
+        foreach (Discovery::endpointCandidates() as $endpoint) {
+            $loaded = $this->ask($endpoint, '/v1internal:loadCodeAssist', ['metadata' => self::METADATA], $accessToken);
+
+            if ($loaded !== null) {
+                return self::extractProjectId($loaded) ?? $this->listCloudAICompanionProjects($accessToken);
             }
         }
 
-        self::say($onProgress, 'No project of your own — using Antigravity\'s default.');
+        return null;
+    }
 
-        return self::FALLBACK_PROJECT;
+    /** pi-antigravity's `listCloudAICompanionProjects()`: the first endpoint that answers decides. */
+    private function listCloudAICompanionProjects(string $accessToken): ?string
+    {
+        foreach (Discovery::endpointCandidates() as $endpoint) {
+            $listed = $this->ask($endpoint, '/v1internal:listCloudAICompanionProjects', new \stdClass(), $accessToken);
+
+            if ($listed !== null) {
+                return self::extractProjectId($listed);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * One discovery request: the answer, or null for an endpoint to pass over.
+     *
+     * @param array<string, mixed>|\stdClass $body
+     * @return array<string, mixed>|null
+     */
+    private function ask(string $endpoint, string $path, array|\stdClass $body, string $accessToken): ?array
+    {
+        try {
+            return $this->json('POST', $this->endpoint($endpoint) . $path, $body, Discovery::headers($accessToken));
+        } catch (Throwable $error) {
+            // The developer's choice: a 429 is not passed over for the next endpoint.
+            if ($error instanceof OauthError && $error->getCode() === 429) {
+                throw $error;
+            }
+
+            return null;
+        }
+    }
+
+    /**
+     * pi-antigravity's `extractProjectId()`: the id under any of the names Google gives it, as a
+     * string or as an object with an `id`, or the first one in a list of them.
+     */
+    public static function extractProjectId(mixed $data): ?string
+    {
+        if (!is_array($data) || array_is_list($data)) {
+            return null;
+        }
+
+        $direct = $data['antigravityProjectId']
+            ?? $data['projectId']
+            ?? $data['backendProjectId']
+            ?? $data['userDefinedCloudaicompanionProject']
+            ?? $data['cloudaicompanionProject']
+            ?? $data['project']
+            ?? null;
+
+        if (is_string($direct) && $direct !== '') {
+            return $direct;
+        }
+
+        if (is_array($direct) && is_string($direct['id'] ?? null) && $direct['id'] !== '') {
+            return $direct['id'];
+        }
+
+        foreach (['projects', 'projectIds', 'cloudaicompanionProjects'] as $key) {
+            $value = $data[$key] ?? null;
+
+            if (!is_array($value) || !array_is_list($value)) {
+                continue;
+            }
+
+            foreach ($value as $item) {
+                $nested = self::extractProjectId($item) ?? (is_string($item) && $item !== '' ? $item : null);
+
+                if ($nested !== null) {
+                    return $nested;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * pi-antigravity's `defaultProjectId()`: `ANTIGRAVITY_PROJECT_ID` when it is set, else
+     * `stableProjectId()` — a UUID-shaped id made from the seed, the same one every time.
+     */
+    public static function defaultProjectId(string $seed): string
+    {
+        $explicit = trim(Discovery::env('PROJECT_ID') ?? '');
+
+        if ($explicit !== '') {
+            return $explicit;
+        }
+
+        $bytes = substr(sha1("antigravity:{$seed}", true), 0, 16);
+        $bytes[6] = chr((ord($bytes[6]) & 0x0f) | 0x50);
+        $bytes[8] = chr((ord($bytes[8]) & 0x3f) | 0x80);
+        $hex = bin2hex($bytes);
+
+        return sprintf('%s-%s-%s-%s-%s', substr($hex, 0, 8), substr($hex, 8, 4), substr($hex, 12, 4), substr($hex, 16, 4), substr($hex, 20));
     }
 
     /**
@@ -439,7 +504,8 @@ final class AntigravityOauth implements OauthFlow
     public function email(string $accessToken): ?string
     {
         try {
-            $data = $this->json('GET', $this->endpoint(self::USERINFO_URL), null, $accessToken);
+            // Upstream's `getUserEmail()` sends the token and nothing else.
+            $data = $this->json('GET', $this->endpoint(self::USERINFO_URL), null, ['Authorization' => "Bearer {$accessToken}"]);
         } catch (Throwable) {
             return null;
         }
@@ -458,25 +524,20 @@ final class AntigravityOauth implements OauthFlow
         return $this->send(new Request(
             'POST',
             $url,
-            ['content-type' => 'application/x-www-form-urlencoded', 'accept' => 'application/json'],
+            // Upstream's token requests send this and nothing else.
+            ['content-type' => 'application/x-www-form-urlencoded'],
             http_build_query($fields),
         ), $url);
     }
 
     /**
-     * @param array<string, mixed>|null $body
+     * @param array<string, mixed>|\stdClass|null $body
+     * @param array<string, string> $headers all of them: nothing is added to what upstream sends
      * @return array<string, mixed>
      */
-    private function json(string $method, string $url, ?array $body, string $accessToken): array
+    private function json(string $method, string $url, array|\stdClass|null $body, array $headers): array
     {
-        $encoded = $body === null ? null : self::encode($body);
-
-        return $this->send(new Request($method, $url, [
-            'accept' => 'application/json',
-            ...($encoded === null ? [] : ['content-type' => 'application/json']),
-            'authorization' => "Bearer {$accessToken}",
-            ...self::DISCOVERY_HEADERS,
-        ], $encoded), $url);
+        return $this->send(new Request($method, $url, $headers, $body === null ? null : self::encode($body)), $url);
     }
 
     /** @return array<string, mixed> */
@@ -525,8 +586,8 @@ final class AntigravityOauth implements OauthFlow
         }
     }
 
-    /** @param array<string, mixed> $body */
-    private static function encode(array $body): string
+    /** @param array<string, mixed>|\stdClass $body */
+    private static function encode(array|\stdClass $body): string
     {
         try {
             return json_encode($body, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);

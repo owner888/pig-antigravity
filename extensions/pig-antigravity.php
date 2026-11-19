@@ -173,17 +173,19 @@ return function (ExtensionApi $pig): void {
         });
     };
 
+    // "After you sign in, the provider refreshes its catalog from Antigravity" — with the new
+    // account's key, which `auth.json` does not hold yet when the flow returns.
+    $oauth = new LazyAntigravityOauth(
+        $antigravityClient,
+        static fn (OauthCredentials $credentials) => $refreshInBackground($credentials),
+    );
+
     $pig->registerProvider(new Provider(
         id: Models::PROVIDER,
         name: 'Antigravity (Gemini 3, Claude, GPT-OSS)',
         models: Models::fallback(),
         api: new AntigravityApi(),
-        // "After you sign in, the provider refreshes its catalog from Antigravity" — with the new
-        // account's key, which `auth.json` does not hold yet when the flow returns.
-        oauth: new LazyAntigravityOauth(
-            $antigravityClient,
-            static fn (OauthCredentials $credentials) => $refreshInBackground($credentials),
-        ),
+        oauth: $oauth,
         resold: true,
         images: ImageGenerator::models(),
         imageApi: new ImageGenerator(),
@@ -229,9 +231,21 @@ return function (ExtensionApi $pig): void {
         },
     );
 
+    /**
+     * pi-antigravity's `ensureFresh()`: an account about to become the active one has its token
+     * renewed first when it is due, so the renewal happens at the switch and not at the next
+     * request — and a renewal that fails leaves the switch unmade.
+     */
+    $ensureFresh = static fn (string $id): ?string => $accounts->ensureFresh(
+        $id,
+        static fn (OauthCredentials $credentials): OauthCredentials => $oauth->refresh($credentials),
+    );
+
     /** Make one stored account the active one, in both files at once. */
-    $activate = static function (string $id) use ($auth, $accounts): ?OauthCredentials {
-        if (!isset($accounts->accounts()[$id])) {
+    $activate = static function (string $id) use ($auth, $accounts, $ensureFresh): ?OauthCredentials {
+        $id = $ensureFresh($id);
+
+        if ($id === null) {
             return null;
         }
 
@@ -246,20 +260,24 @@ return function (ExtensionApi $pig): void {
     };
 
     /** The next account round-robin, in both files. */
-    $rotate = static function () use ($auth, $accounts): ?OauthCredentials {
-        $next = $accounts->rotateNext();
+    $rotate = static function () use ($accounts, $activate): ?OauthCredentials {
+        $next = $accounts->nextId();
 
-        if ($next !== null) {
-            $auth->setCredentials(Models::PROVIDER, $next);
-        }
-
-        return $next;
+        return $next === null ? null : $activate($next);
     };
 
     /** Forget one; if it was the active one, whichever is left becomes active — or nothing is. */
-    $remove = static function (string $id) use ($auth, $accounts): bool {
+    $remove = static function (string $id) use ($auth, $accounts, $ensureFresh): bool {
         if (!isset($accounts->accounts()[$id])) {
             return false;
+        }
+
+        // Upstream's `removeAccount()`: the account that takes over is made fresh first, and a
+        // renewal that fails leaves the removal unmade.
+        $successor = $accounts->successorOf($id);
+
+        if ($successor !== null) {
+            $ensureFresh($successor);
         }
 
         $accounts->remove($id);
@@ -302,7 +320,8 @@ return function (ExtensionApi $pig): void {
             return null;
         }
 
-        return [$auth, $cred->access, $cred->projectId ?? 'antigravity-default', $cred];
+        // pi-antigravity's `getApiKey()`: the credential's project, else the account's default id.
+        return [$auth, $cred->access, $cred->projectId ?? AntigravityOauth::defaultProjectId($cred->email ?? 'antigravity-default'), $cred];
     };
 
     /**
@@ -401,12 +420,17 @@ return function (ExtensionApi $pig): void {
             $id = is_string($args['id'] ?? null) ? $args['id'] : '';
             $noSuch = AccountsPanel::say($request['locale'], 'no_such_account', ['id' => $id]);
 
-            return match ($action) {
-                'activate' => $activate($id) !== null ? null : $noSuch,
-                'remove' => $remove($id) ? null : $noSuch,
-                'rotate' => $rotate() !== null ? null : AccountsPanel::say($request['locale'], 'nothing_to_rotate'),
-                default => "No action '{$action}'.",
-            };
+            try {
+                return match ($action) {
+                    'activate' => $activate($id) !== null ? null : $noSuch,
+                    'remove' => $remove($id) ? null : $noSuch,
+                    'rotate' => $rotate() !== null ? null : AccountsPanel::say($request['locale'], 'nothing_to_rotate'),
+                    default => "No action '{$action}'.",
+                };
+            } catch (Throwable $error) {
+                // A switch renews the account's token, and that can fail: said, not thrown at the page.
+                return AntigravityApi::redactSecrets($error->getMessage());
+            }
         },
         icon: '🔑',
         commands: ['accounts', 'antigravity.accounts'],
@@ -483,7 +507,14 @@ return function (ExtensionApi $pig): void {
             $trimmed = trim($args);
 
             if ($trimmed === 'rotate') {
-                $next = $rotate();
+                try {
+                    $next = $rotate();
+                } catch (Throwable $error) {
+                    $emit($ctx, 'Antigravity account not rotated: ' . AntigravityApi::redactSecrets($error->getMessage()), 'error');
+
+                    return;
+                }
+
                 $emit($ctx, $next !== null ? 'Rotated Antigravity account to: ' . ($next->email ?? 'next') : 'Only one Antigravity account available; cannot rotate.', $next !== null ? 'info' : 'warning');
 
                 return;
@@ -503,7 +534,14 @@ return function (ExtensionApi $pig): void {
                     return;
                 }
 
-                $action($id);
+                try {
+                    $action($id);
+                } catch (Throwable $error) {
+                    $emit($ctx, 'Antigravity account not ' . ($verb === 'switch ' ? 'switched: ' : 'removed: ') . AntigravityApi::redactSecrets($error->getMessage()), 'error');
+
+                    return;
+                }
+
                 $emit($ctx, ($verb === 'switch ' ? 'Active Antigravity account: ' : 'Antigravity account removed: ') . $id, 'info');
 
                 return;

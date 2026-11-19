@@ -17,16 +17,14 @@ use Throwable;
  * - `v1internal:loadCodeAssist` (user metadata, tier, project ID)
  * - `v1internal:retrieveUserQuotaSummary` (5h and weekly quota pools for Gemini & Claude/GPT)
  * - `v1internal:fetchAvailableModels` (runtime models and their quota remaining fraction)
+ *
+ * What goes out is pi-antigravity's `usage/usage.ts`, request for request: the endpoints and
+ * their order (`Discovery::endpointCandidates()`), the headers, the bodies and the project in
+ * them. Upstream sends the three at once; here they go one after another, in its order.
  */
 final class QuotaClient
 {
     public const string DEFAULT_ENDPOINT = 'https://daily-cloudcode-pa.googleapis.com';
-
-    public const array ENDPOINTS = [
-        'https://daily-cloudcode-pa.googleapis.com',
-        'https://cloudcode-pa.googleapis.com',
-        'https://daily-cloudcode-pa.sandbox.googleapis.com',
-    ];
 
     public function __construct(
         private readonly ?HttpClient $http = null,
@@ -50,10 +48,12 @@ final class QuotaClient
     public function fetchUsage(string $token, ?string $projectId = null): array
     {
         $http = $this->http ?? new HttpClient(15.0);
-        $candidates = $this->endpoint !== null ? [$this->endpoint] : self::ENDPOINTS;
+        $candidates = $this->endpoint !== null ? [$this->endpoint] : Discovery::endpointCandidates();
+        // `creds.projectId || resolveProjectId(...)`: the credential's, else the default id.
+        $initialProject = $projectId !== null && $projectId !== '' ? $projectId : AntigravityOauth::defaultProjectId('antigravity-default');
 
         // 1. loadCodeAssist
-        $assistData = $this->postJsonSafe($http, $candidates, '/v1internal:loadCodeAssist', $token, $projectId, [
+        $assistData = $this->postJsonSafe($http, $candidates, '/v1internal:loadCodeAssist', $token, [
             'metadata' => [
                 'ideType' => 'ANTIGRAVITY',
                 'platform' => 'PLATFORM_UNSPECIFIED',
@@ -61,17 +61,16 @@ final class QuotaClient
             ],
         ]);
 
-        $resolvedProject = $projectId;
-        if (($resolvedProject === null || $resolvedProject === '') && is_array($assistData)) {
-            $resolvedProject = self::extractProject($assistData);
-        }
-        $resolvedProject ??= 'antigravity-default';
+        // `resolveProjectId()`: `ANTIGRAVITY_PROJECT_ID`, then the project the answer names, then
+        // the credential's, then the default id.
+        $explicit = trim(Discovery::env('PROJECT_ID') ?? '');
+        $resolvedProject = $explicit !== '' ? $explicit : (AntigravityOauth::extractProjectId($assistData) ?? $initialProject);
 
         // 2. retrieveUserQuotaSummary
         $quotaData = null;
         $quotaError = null;
         try {
-            $quotaRes = $this->postJson($http, $candidates, '/v1internal:retrieveUserQuotaSummary', $token, $resolvedProject, []);
+            $quotaRes = $this->postJson($http, $candidates, '/v1internal:retrieveUserQuotaSummary', $token, []);
             $quotaData = $quotaRes['data'];
             $endpointUsed = $quotaRes['endpoint'];
         } catch (RateLimited $e) {
@@ -81,21 +80,17 @@ final class QuotaClient
             $endpointUsed = $candidates[0];
         }
 
-        // 3. fetchAvailableModels
-        $modelsData = $this->postJsonSafe($http, $candidates, '/v1internal:fetchAvailableModels', $token, $resolvedProject, [
-            'project' => $resolvedProject,
-        ]);
+        // 3. fetchAvailableModels — upstream's `fetchAvailableModelsCatalog()`: every endpoint,
+        // merged, under the project known before the first answer; with no catalog from any of
+        // them the whole read fails, as upstream's does.
+        $modelsData = Discovery::fetchAvailableModelsCatalog($token, $initialProject, http: $this->http, endpoints: $candidates)['data'];
 
         $groups = [];
         if (is_array($quotaData) && isset($quotaData['groups']) && is_array($quotaData['groups'])) {
             $groups = self::parseQuotaGroups($quotaData['groups']);
         }
 
-        $models = [];
-        $defaultAgentModelId = null;
-        if (is_array($modelsData)) {
-            [$models, $defaultAgentModelId] = self::parseAvailableModels($modelsData);
-        }
+        [$models, $defaultAgentModelId] = self::parseAvailableModels($modelsData);
 
         $planLabel = null;
         if (is_array($assistData)) {
@@ -272,7 +267,6 @@ final class QuotaClient
         array $candidates,
         string $path,
         string $token,
-        ?string $projectId,
         array $body,
     ): array {
         $lastError = 'No endpoint available';
@@ -328,11 +322,10 @@ final class QuotaClient
         array $candidates,
         string $path,
         string $token,
-        ?string $projectId,
         array $body,
     ): mixed {
         try {
-            $res = $this->postJson($http, $candidates, $path, $token, $projectId, $body);
+            $res = $this->postJson($http, $candidates, $path, $token, $body);
 
             return $res['data'];
         } catch (RateLimited $e) {
@@ -340,21 +333,6 @@ final class QuotaClient
         } catch (Throwable) {
             return null;
         }
-    }
-
-    /**
-     * @param array<string, mixed> $data
-     */
-    private static function extractProject(array $data): ?string
-    {
-        if (isset($data['cloudaistatus']['project']) && is_string($data['cloudaistatus']['project'])) {
-            return $data['cloudaistatus']['project'];
-        }
-        if (isset($data['project']) && is_string($data['project'])) {
-            return $data['project'];
-        }
-
-        return null;
     }
 
     /**
@@ -455,7 +433,7 @@ final class QuotaClient
     public function fetchRemainingCredits(string $token, ?string $projectId = null): array
     {
         $http = $this->http ?? new HttpClient(15.0);
-        $assistData = $this->postJsonSafe($http, $this->endpoint !== null ? [$this->endpoint] : self::ENDPOINTS, '/v1internal:loadCodeAssist', $token, $projectId, [
+        $assistData = $this->postJsonSafe($http, $this->endpoint !== null ? [$this->endpoint] : Discovery::endpointCandidates(), '/v1internal:loadCodeAssist', $token, [
             'metadata' => [
                 'ideType' => 'ANTIGRAVITY',
                 'platform' => 'PLATFORM_UNSPECIFIED',
