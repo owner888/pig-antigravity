@@ -401,13 +401,17 @@ final class GoogleSearch
                     continue;
                 }
 
+                if ($response->status === 429) {
+                    throw RateLimited::during('Antigravity Google Search', $text);
+                }
+
                 if (!$response->isSuccessful()) {
                     $lastError = AntigravityApi::friendlyAntigravityError($response->status, $text);
                     // "Retry next endpoint, or the next fallback model, for model-specific 400s":
                     // a model that will not take this request's arguments is not every model.
                     $modelRejected = $response->status === 400 && preg_match('/invalid argument|thinking/i', $text) === 1;
 
-                    if ($response->status === 404 || $modelRejected || in_array($response->status, [429, 500, 502, 503, 504], true)) {
+                    if ($response->status === 404 || $modelRejected || in_array($response->status, [500, 502, 503, 504], true)) {
                         continue;
                     }
 

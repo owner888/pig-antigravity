@@ -74,6 +74,8 @@ final class QuotaClient
             $quotaRes = $this->postJson($http, $candidates, '/v1internal:retrieveUserQuotaSummary', $token, $resolvedProject, []);
             $quotaData = $quotaRes['data'];
             $endpointUsed = $quotaRes['endpoint'];
+        } catch (RateLimited $e) {
+            throw $e;
         } catch (Throwable $e) {
             $quotaError = $e->getMessage();
             $endpointUsed = $candidates[0];
@@ -298,12 +300,18 @@ final class QuotaClient
                     ? (string) $data['error']['message']
                     : $text;
 
+                if ($response->status === 429) {
+                    throw RateLimited::during("The request to {$path}", $text);
+                }
+
                 $lastError = "{$path} failed ({$response->status}): " . substr($errMsg, 0, 300);
 
-                // For fatal client errors (not 403/404/429/5xx), don't keep hammering other candidates
-                if (!in_array($response->status, [403, 404, 429, 500, 502, 503, 504], true)) {
+                // For fatal client errors (not 403/404/5xx), don't keep hammering other candidates
+                if (!in_array($response->status, [403, 404, 500, 502, 503, 504], true)) {
                     throw new RuntimeException($lastError);
                 }
+            } catch (RateLimited $e) {
+                throw $e;
             } catch (Throwable $e) {
                 $lastError = $e->getMessage();
             }
@@ -327,6 +335,8 @@ final class QuotaClient
             $res = $this->postJson($http, $candidates, $path, $token, $projectId, $body);
 
             return $res['data'];
+        } catch (RateLimited $e) {
+            throw $e;
         } catch (Throwable) {
             return null;
         }

@@ -25,7 +25,7 @@ use Pig\Ai\Utils\Oauth\OauthCredentials;
  * - **a store with accounts and an `auth.json` that has none**, which is what a sign-in through
  *   the extension leaves if the copy-out did not happen, and
  * - **the tokens pig renews itself**, which have to be written back to *both* or the store goes
- *   stale and the extension's next failover reaches for a token that was replaced hours ago.
+ *   stale and the next switch of account reaches for a token that was replaced hours ago.
  *
  * And upstream's `syncCurrentAuth()` (`syncCurrentAuth()` here), which every listing runs first: a
  * sign-in pig's own `/login antigravity` made lands in `auth.json` only, and without it the
@@ -132,7 +132,7 @@ final class Accounts
     }
 
     /**
-     * Switch to the next available account in the store (round-robin failover).
+     * Switch to the next available account in the store (round-robin).
      *
      * @return OauthCredentials|null Returns new active credentials if rotated, or null if only one or no accounts.
      */

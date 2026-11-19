@@ -403,7 +403,12 @@ final class AntigravityOauth implements OauthFlow
                     ['metadata' => self::METADATA],
                     $accessToken,
                 );
-            } catch (Throwable) {
+            } catch (Throwable $error) {
+                // The developer's choice: a 429 is not passed over for the other endpoint.
+                if ($error instanceof OauthError && $error->getCode() === 429) {
+                    throw $error;
+                }
+
                 continue;
             }
 
@@ -479,6 +484,12 @@ final class AntigravityOauth implements OauthFlow
     {
         $response = $this->http->send($request);
         $text = $response->body->all();
+
+        // Worded without the status or Google's own text: pig's session sends a turn again when
+        // its error reads like a rate limit, and a renewal fails inside a turn.
+        if ($response->status === 429) {
+            throw new OauthError("Google is throttling this account, so the request to {$url} was stopped and nothing more was asked. Wait a while before trying again.", 429);
+        }
 
         if (!$response->isSuccessful()) {
             throw new OauthError("Google answered {$response->status} to {$url}: {$text}");

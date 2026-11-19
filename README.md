@@ -30,7 +30,9 @@ A browser opens and comes back to `localhost:51121/oauth-callback`. Then pick a 
 pig --model antigravity/gemini-3.8-flash
 ```
 
-Signing in again with another Google account keeps the first one. A hard quota wall on the active account switches to the next linked account inside the request.
+Signing in again with another Google account keeps the first one. Switching between them is yours to do (`/antigravity.accounts rotate`, or the accounts panel).
+
+**A 429 from Google stops the request.** Whatever kind it is — throttling, a quota wall, a model out of capacity — pig sends that one request and no other: not to the other endpoint, another tier of the model or your next account, and the session does not retry it. You read what Google said and decide whether to send again, wait, or change model or account. This is stricter than pi-antigravity on purpose: Google has been suspending accounts, and a run of 429s tends to come first.
 
 ## What it adds
 

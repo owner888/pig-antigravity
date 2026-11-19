@@ -347,9 +347,16 @@ final class WebFetch
         $alternateTried = false;
         $unavailable = [];
         $requested = [];
+        $rateLimited = false;
 
         // "Per-request dispatch owns endpoint failover; never repeat the whole retrieval flow."
-        $request = static function (string $path, array $body) use (&$attempts, &$requests, &$endpointAnswered, &$unavailable, &$requested, &$lastError, $endpoints, $http, $token, $signal): array {
+        $request = static function (string $path, array $body) use (&$attempts, &$requests, &$endpointAnswered, &$unavailable, &$requested, &$lastError, &$rateLimited, $endpoints, $http, $token, $signal): array {
+            // The developer's choice, not upstream's: after a 429 no stage asks Google again
+            // (`RateLimited`); what was read before it is still returned.
+            if ($rateLimited) {
+                throw new FetchRefused('Google answered HTTP 429 to this account, so the read stopped there and nothing more was asked. Do not call read_url_content again now; wait, or open the page in a browser.', fatal: true, status: 429);
+            }
+
             if ($path === self::REWRITE_URI_PATH) {
                 $attempts[] = new ArrayObject([
                     'url' => Text::clean(Redaction::redactSecrets((string) ($body['originalUri'] ?? '')), 2_048) ?? '',
@@ -408,6 +415,8 @@ final class WebFetch
                 if ($path === self::TRAWLER_FETCH_PATH) {
                     $endpointAnswered = true;
                 }
+
+                $rateLimited = $response['status'] === 429;
 
                 return $response;
             }

@@ -297,6 +297,25 @@ final class AntigravityOauthTest extends TestCase
         );
     }
 
+    public function testA429WhileLookingForAProjectEndsTheSignInRatherThanAskingTheOtherEndpoint(): void
+    {
+        $url = $this->serve('{"error":{"code":429}}', status: 429, reason: 'Too Many Requests');
+
+        $problem = null;
+
+        try {
+            $this->onTheLoop(fn (): string => $this->antigravity($url)->project('ya29.a'));
+        } catch (OauthError $caught) {
+            $problem = $caught;
+        }
+
+        $this->assertNotNull($problem);
+        $this->assertStringStartsWith('Google is throttling this account, so the request to ', $problem->getMessage());
+        // Nothing in it that pig's session reads as "send the turn again".
+        $this->assertDoesNotMatchRegularExpression('/429|rate.?limit|too many requests/i', $problem->getMessage());
+        $this->assertSame(1, $this->server->connections());
+    }
+
     public function testAntigravitysKeyCarriesTheProjectAlongsideTheToken(): void
     {
         $key = AntigravityOauth::keyFor(new OauthCredentials('r', 'ya29.a', 0, projectId: 'proj-1'));

@@ -4,6 +4,16 @@ What changed, newest first, in pig's format: `## Unreleased` while working, `## 
 at release. The version lives in the git tag only, and follows the pi-antigravity release the port
 is in step with.
 
+## [0.14.2] - 2026-11-19
+
+### Changed
+
+- **A 429 from Google stops the request, whatever kind it is.** Google has been suspending accounts, and a run of 429s tends to come first; one refused turn used to be sent up to eight times, and a quota wall was sent once for every signed-in account. Now it is that one request and nothing else: not the other endpoint, not another tier of the same model (`-xhigh` no longer steps down to `-high`), not the next account, and the session does not retry it — a throttle no longer says "retrying automatically". The same in image generation, Google Search, `read_url_content`, `/antigravity.usage`, the catalog refresh and the sign-in. You decide whether to send again, wait, or change model or account (`/antigravity.accounts rotate`). No setting turns this off. Not pi-antigravity's behaviour.
+
+### Removed
+
+- Switching to the next account by itself at a quota wall, and stepping to a sibling tier at a model out of capacity (see above).
+
 ## [0.14.1] - 2026-11-19
 
 ### Changed

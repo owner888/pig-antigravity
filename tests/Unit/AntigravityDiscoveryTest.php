@@ -13,6 +13,7 @@ use Pig\Test\CannedServer;
 use PigAntigravity\Catalog;
 use PigAntigravity\Discovery;
 use PigAntigravity\Grouping;
+use PigAntigravity\RateLimited;
 use PigAntigravity\Routing;
 use RuntimeException;
 
@@ -426,6 +427,25 @@ final class AntigravityDiscoveryTest extends TestCase
         }
 
         $this->assertFalse($published);
+    }
+
+    public function testA429EndsACatalogRefreshAtThatOneEndpoint(): void
+    {
+        // The developer's choice: upstream asks every endpoint and merges what answered.
+        $first = new CannedServer();
+        $url = $first->start(["HTTP/1.1 429 Refused\r\nContent-Length: 2\r\n\r\n{}"]);
+        $second = new CannedServer();
+        $secondUrl = $second->start(["HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"]);
+
+        try {
+            Async::run(static fn (): array => Discovery::fetchAvailableModelsCatalog('ya29.a', 'proj-1', endpoints: [rtrim($url, '/'), rtrim($secondUrl, '/')]));
+            $this->fail('refreshed');
+        } catch (RateLimited $error) {
+            $this->assertStringStartsWith('The Antigravity model catalog refresh stopped at the first refusal', $error->getMessage());
+        }
+
+        $this->assertSame(1, $first->connections());
+        $this->assertSame('', $second->receivedHead(), 'the second host was never asked');
     }
 
     public function testEndpointAnswersMergeInOrderAndNoneIsAnError(): void

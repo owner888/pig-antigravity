@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace PigAntigravity;
 
-use Closure;
 use InvalidArgumentException;
 use Pig\Ai\AssistantImages;
 use Pig\Ai\Cost;
@@ -37,8 +36,8 @@ use Throwable;
  * per attempt, the prompt (and any reference images) as the user turn, an `imageConfig` with the
  * aspect ratio, tried on each of `QuotaClient::ENDPOINTS` and then on the next model of
  * `MODEL_FALLBACKS` after a 404. The model that answered is the result's `model`, so a fallback is
- * never silent. A quota wall on every attempt asks `$failover` for the next stored account, as the
- * chat protocol does (`AntigravityApi::send()`).
+ * never silent. A 429 ends it at that one request (`RateLimited`), as it does the chat protocol
+ * (`AntigravityApi::send()`).
  */
 final class ImageGenerator implements ProviderImages
 {
@@ -72,13 +71,10 @@ final class ImageGenerator implements ProviderImages
 
     /**
      * @param string|null $endpoint the one host to try in place of `QuotaClient::ENDPOINTS` — for tests
-     * @param (Closure(list<string> $triedAccessTokens): ?string)|null $failover the next stored account's
-     *        api key after a quota wall, or null when none is left — `AntigravityApi`'s `$failover`
      */
     public function __construct(
         private readonly ?HttpClient $http = null,
         private readonly ?string $endpoint = null,
-        private readonly ?Closure $failover = null,
     ) {
     }
 
@@ -255,7 +251,7 @@ final class ImageGenerator implements ProviderImages
 
     /**
      * The request loop: the model asked for, then `MODEL_FALLBACKS` after a 404; each on every
-     * endpoint until one answers with images; and after a quota wall, the next account.
+     * endpoint until one answers with images, or with a 429.
      *
      * @param list<ImageContent> $references
      * @return array{0: list<array{data: string, mimeType: string}>, 1: list<string>, 2: string, 3: array<string, mixed>|null}
@@ -272,98 +268,87 @@ final class ImageGenerator implements ProviderImages
             $parts[] = ['inlineData' => ['mimeType' => $reference->mimeType, 'data' => $reference->data]];
         }
 
-        $tried = [$token];
+        $lastError = 'No endpoint available';
 
-        while (true) {
-            $lastError = 'No endpoint available';
-            $quotaWall = false;
-
-            foreach ($modelsToTry as $currentModel) {
-                $body = [
-                    'project' => $project,
-                    'model' => $currentModel,
-                    'request' => [
-                        'contents' => [['role' => 'user', 'parts' => $parts]],
-                        'generationConfig' => [
-                            'imageConfig' => ['aspectRatio' => $ratio],
-                            'candidateCount' => 1,
-                        ],
+        foreach ($modelsToTry as $currentModel) {
+            $body = [
+                'project' => $project,
+                'model' => $currentModel,
+                'request' => [
+                    'contents' => [['role' => 'user', 'parts' => $parts]],
+                    'generationConfig' => [
+                        'imageConfig' => ['aspectRatio' => $ratio],
+                        'candidateCount' => 1,
                     ],
-                    'requestType' => 'image_gen',
-                    'userAgent' => 'antigravity',
-                    'requestId' => sprintf('image_gen/%d/%s/1', (int) (microtime(true) * 1000), bin2hex(random_bytes(16))),
-                    ...(Credits::enabled() ? ['enabledCreditTypes' => Credits::CREDIT_TYPES] : []),
+                ],
+                'requestType' => 'image_gen',
+                'userAgent' => 'antigravity',
+                'requestId' => sprintf('image_gen/%d/%s/1', (int) (microtime(true) * 1000), bin2hex(random_bytes(16))),
+                ...(Credits::enabled() ? ['enabledCreditTypes' => Credits::CREDIT_TYPES] : []),
+            ];
+
+            if ($options->onPayload !== null) {
+                $body = ($options->onPayload)($body, self::model($currentModel)) ?? $body;
+            }
+
+            foreach ($candidates as $endpoint) {
+                $directUrl = rtrim($endpoint, '/') . '/v1internal:generateContent';
+                $headers = [
+                    'Authorization' => "Bearer {$token}",
+                    'Content-Type' => 'application/json',
+                    'User-Agent' => AntigravityCli::userAgent(),
                 ];
 
-                if ($options->onPayload !== null) {
-                    $body = ($options->onPayload)($body, self::model($currentModel)) ?? $body;
-                }
+                try {
+                    $response = $http->send(new Request('POST', $directUrl, $headers, json_encode($body) ?: '{}'), $options->signal);
 
-                foreach ($candidates as $endpoint) {
-                    $directUrl = rtrim($endpoint, '/') . '/v1internal:generateContent';
-                    $headers = [
-                        'Authorization' => "Bearer {$token}",
-                        'Content-Type' => 'application/json',
-                        'User-Agent' => AntigravityCli::userAgent(),
-                    ];
+                    if ($response->status === 404) {
+                        $streamUrl = rtrim($endpoint, '/') . '/v1internal:streamGenerateContent?alt=sse';
+                        $streamHeaders = [...$headers, 'Accept' => 'text/event-stream'];
+                        $response = $http->send(new Request('POST', $streamUrl, $streamHeaders, json_encode($body) ?: '{}'), $options->signal);
+                    }
 
-                    try {
-                        $response = $http->send(new Request('POST', $directUrl, $headers, json_encode($body) ?: '{}'), $options->signal);
+                    if ($options->onResponse !== null) {
+                        ($options->onResponse)(['status' => $response->status, 'headers' => $response->headers], self::model($currentModel));
+                    }
+
+                    if (!$response->isSuccessful()) {
+                        $errText = $response->body->all();
+
+                        if ($response->status === 429) {
+                            throw RateLimited::during('Image generation', $errText);
+                        }
+
+                        $lastError = "Image generation failed ({$response->status}): " . substr($errText, 0, 300);
 
                         if ($response->status === 404) {
-                            $streamUrl = rtrim($endpoint, '/') . '/v1internal:streamGenerateContent?alt=sse';
-                            $streamHeaders = [...$headers, 'Accept' => 'text/event-stream'];
-                            $response = $http->send(new Request('POST', $streamUrl, $streamHeaders, json_encode($body) ?: '{}'), $options->signal);
+                            // A 404 is the next model's to try.
+                            break;
                         }
 
-                        if ($options->onResponse !== null) {
-                            ($options->onResponse)(['status' => $response->status, 'headers' => $response->headers], self::model($currentModel));
-                        }
-
-                        if (!$response->isSuccessful()) {
-                            $errText = $response->body->all();
-                            $lastError = "Image generation failed ({$response->status}): " . substr($errText, 0, 300);
-                            $quotaWall = $response->status === 429 && AntigravityApi::isQuotaWall($errText);
-
-                            if ($response->status === 404 || $quotaWall) {
-                                // A 404 is the next model's to try; a quota wall every endpoint answers alike.
-                                break;
-                            }
-
-                            continue;
-                        }
-
-                        $quotaWall = false;
-                        [$images, $texts, $usage] = self::parseResponse($response->body->all());
-
-                        if ($images !== []) {
-                            return [$images, $texts, $currentModel, $usage];
-                        }
-
-                        $lastError = 'The response had no image in it' . ($texts !== [] ? ': ' . substr(trim(implode('', $texts)), 0, 300) : '.');
-                    } catch (Throwable $e) {
-                        if ($options->signal?->aborted() ?? false) {
-                            throw $e;
-                        }
-
-                        $lastError = $e->getMessage();
+                        continue;
                     }
-                }
 
-                if ($quotaWall) {
-                    break;
+                    [$images, $texts, $usage] = self::parseResponse($response->body->all());
+
+                    if ($images !== []) {
+                        return [$images, $texts, $currentModel, $usage];
+                    }
+
+                    $lastError = 'The response had no image in it' . ($texts !== [] ? ': ' . substr(trim(implode('', $texts)), 0, 300) : '.');
+                } catch (RateLimited $e) {
+                    throw $e;
+                } catch (Throwable $e) {
+                    if ($options->signal?->aborted() ?? false) {
+                        throw $e;
+                    }
+
+                    $lastError = $e->getMessage();
                 }
             }
-
-            $next = $quotaWall && $this->failover !== null ? ($this->failover)($tried) : null;
-
-            if ($next === null) {
-                throw new RuntimeException("Image generation failed: {$lastError}");
-            }
-
-            [$token, $project] = self::credentials($next);
-            $tried[] = $token;
         }
+
+        throw new RuntimeException("Image generation failed: {$lastError}");
     }
 
     /**

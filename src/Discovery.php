@@ -619,7 +619,8 @@ final class Discovery
 
     /**
      * `fetchAvailableModelsFromEndpoint()`: the endpoint's answer, or null when it failed — the
-     * failure kept in $lastError, which is what upstream's `setLastError()` does with it.
+     * failure kept in $lastError, which is what upstream's `setLastError()` does with it. A 429
+     * is thrown (`RateLimited`), so the endpoints after it are not asked.
      *
      * @return array{endpoint: string, status: int, data: mixed}|null
      */
@@ -639,6 +640,10 @@ final class Discovery
                 $data = ['raw' => $text];
             }
 
+            if ($response->status === 429) {
+                throw RateLimited::during('The Antigravity model catalog refresh', $text);
+            }
+
             if (!$response->isSuccessful()) {
                 $message = is_array($data) && is_array($data['error'] ?? null) && is_string($data['error']['message'] ?? null)
                     ? $data['error']['message']
@@ -649,6 +654,8 @@ final class Discovery
             }
 
             return ['endpoint' => $endpoint, 'status' => $response->status, 'data' => $data];
+        } catch (RateLimited $error) {
+            throw $error;
         } catch (Throwable $error) {
             $lastError = $error;
 

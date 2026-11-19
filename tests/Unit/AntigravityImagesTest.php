@@ -216,24 +216,17 @@ final class AntigravityImagesTest extends TestCase
         $this->assertSame(ImageGenerator::DEFAULT_MODEL, $result->model);
     }
 
-    public function testAQuotaWallFailsOverToTheNextAccount(): void
+    public function testA429EndsItAtThatOneRequest(): void
     {
-        $tried = [];
-        $failover = static function (array $tokens) use (&$tried): ?string {
-            $tried[] = $tokens;
-
-            return count($tried) === 1 ? self::key('second-token', 'second-project') : null;
-        };
-        $url = $this->server->startSequence([[self::refusal(429, 'Individual quota reached. Resets in 5m.')], self::ok([self::imageChunk()])]);
-        self::registerAntigravity(images: new ImageGenerator(endpoint: $url, failover: $failover));
+        // The developer's choice: no next endpoint, model or account, where upstream fails over.
+        $url = $this->server->startSequence([[self::refusal(429, 'Resource has been exhausted (e.g. check quota).')], self::ok([self::imageChunk()])]);
+        self::registerAntigravity(images: new ImageGenerator(endpoint: $url));
 
         $result = self::generate('a cat');
 
-        $this->assertSame(StopReason::Stop, $result->stopReason, (string) $result->errorMessage);
-        $this->assertSame([['ya29.a']], $tried);
-        $this->assertSame(2, $this->server->connections());
-        $this->assertStringContainsString('Bearer second-token', $this->server->received());
-        $this->assertStringContainsString('"project":"second-project"', $this->server->received());
+        $this->assertSame(StopReason::Error, $result->stopReason);
+        $this->assertStringStartsWith('Image generation stopped at the first refusal, and nothing was sent again: This model is unavailable right now', (string) $result->errorMessage);
+        $this->assertSame(1, $this->server->connections());
     }
 
     public function testEveryRefusalIsAnErrorResultInItsOwnWords(): void

@@ -23,9 +23,9 @@ declare(strict_types=1);
  * - **`Auth::useSecondStore()`** is where `antigravity-accounts.json` meets `auth.json`: the
  *   session reads the active account when `auth.json` has none, and tells the store about a
  *   renewal so the extension's copy of a token does not go stale.
- * - **The 429 failover** is the protocol's own, as pi-antigravity has it: a quota wall on one
- *   account is answered inside the request by switching to the next stored account and sending
- *   again (`AntigravityApi`'s `$failover`, below).
+ * - **No 429 failover**, where pi-antigravity switches to the next stored account at a quota wall
+ *   and sends again: a 429 ends the request (`AntigravityApi::send()`), and changing account is
+ *   `/antigravity.accounts rotate`, by hand.
  * - **`registerWebPanel()`** is the web UI's accounts panel (`AccountsPanel`), which used to be
  *   written into the page: the extension describes it, the page draws it in the sidebar's
  *   Extensions group, and `/accounts` opens it.
@@ -135,41 +135,6 @@ return function (ExtensionApi $pig): void {
 
     // ---- the provider -------------------------------------------------------------------
 
-    /**
-     * pi-antigravity's `failoverToNextAccount(triedAccessTokens)`: the next stored account whose
-     * access token has not been tried, renewed if it is due (one whose renewal fails is skipped),
-     * made the active one in both files — and its api key, or null when no account is left.
-     *
-     * @param list<string> $tried
-     */
-    $failover = static function (array $tried) use ($auth, $accounts, $sync): ?string {
-        $sync();
-        for ($i = 0, $total = $accounts->count(); $i < $total; $i++) {
-            $next = $accounts->rotateNext();
-
-            if ($next === null) {
-                return null;
-            }
-
-            $auth->setCredentials(Models::PROVIDER, $next);
-
-            try {
-                $fresh = $auth->freshCredentials(Models::PROVIDER);
-            } catch (\Throwable) {
-                // "Skip accounts whose refresh token is no longer valid."
-                continue;
-            }
-
-            if ($fresh === null || $fresh->access === '' || in_array($fresh->access, $tried, true)) {
-                continue;
-            }
-
-            return $auth->apiKey(Models::PROVIDER);
-        }
-
-        return null;
-    };
-
     // Resold: `claude-sonnet-5-5` is Anthropic's id, and a bare `--model sonnet` has to keep
     // meaning Anthropic's — see `Models::RESOLD` in the core for the rule this joins.
     /**
@@ -212,7 +177,7 @@ return function (ExtensionApi $pig): void {
         id: Models::PROVIDER,
         name: 'Antigravity (Gemini 3, Claude, GPT-OSS)',
         models: Models::fallback(),
-        api: new AntigravityApi(failover: $failover),
+        api: new AntigravityApi(),
         // "After you sign in, the provider refreshes its catalog from Antigravity" — with the new
         // account's key, which `auth.json` does not hold yet when the flow returns.
         oauth: new LazyAntigravityOauth(
@@ -221,7 +186,7 @@ return function (ExtensionApi $pig): void {
         ),
         resold: true,
         images: ImageGenerator::models(),
-        imageApi: new ImageGenerator(failover: $failover),
+        imageApi: new ImageGenerator(),
     ));
 
     // And then the catalog on disk — pig's own store, which `Discovery` keeps, or pi's — which is a

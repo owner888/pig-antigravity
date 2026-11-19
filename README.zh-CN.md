@@ -30,7 +30,9 @@ pig install git:github.com/owner888/pig-antigravity
 pig --model antigravity/gemini-3.8-flash
 ```
 
-用另一个 Google 账号再登录一次，前一个账号会保留。当前账号撞到硬性限额时，会在请求内切到下一个已关联的账号。
+用另一个 Google 账号再登录一次，前一个账号会保留。账号之间由你手动切换（`/antigravity.accounts rotate`，或账号面板）。
+
+**Google 返回 429 时请求就此停下。**无论是限流、额度用尽还是模型暂无容量，pig 只发这一次请求：不换端点、不换同一模型的其他档位、不切到下一个账号，会话也不会自动重试。由你看过 Google 的回复后决定重发、等待，还是换模型或账号。这比 pi-antigravity 更严格，是有意为之：Google 近期封号较多，而封号前往往先出现一连串 429。
 
 ## 它带来什么
 
