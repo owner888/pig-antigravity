@@ -1,0 +1,12 @@
+version: 2
+
+secret:
+  # Google's public Antigravity desktop OAuth client secret (an installed-application secret,
+  # not confidential by design; PKCE protects the exchange). Embedded as upstream does.
+  # Listed by SHA-256, so the secret itself is not written here: of the plain value, and of
+  # its base64 form as it appears in src/AntigravityOauth.php.
+  ignored-matches:
+    - name: Public Antigravity desktop OAuth client secret
+      match: 1d2f041093fd95aa8995a038c711d50a7960da09a505381c09a745d6ad0ecc60
+    - name: Public Antigravity desktop OAuth client secret (base64)
+      match: 5abf1a7614d14fea8aba77e46175c2ecb6651feb9c60d93bbf8dd6963bba383d
