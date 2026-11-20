@@ -38,8 +38,8 @@ final class Models
         'gemini-3-flash' => ['Gemini 3 Flash (Antigravity)', 1_048_576, 65_536, true, true, ['off' => null, 'minimal' => null, 'low' => null, 'medium' => null, 'high' => 'high', 'xhigh' => null, 'max' => null]],
         'gemini-2.5-flash' => ['Gemini 2.5 Flash (Antigravity)', 1_048_576, 65_536, true, true, ['off' => null, 'minimal' => null, 'low' => null, 'medium' => null, 'high' => 'high', 'xhigh' => null, 'max' => null]],
         'gemini-2.5-flash-lite' => ['Gemini 2.5 Flash Lite (Antigravity)', 1_048_576, 65_536, true, true, ['off' => null, 'minimal' => null, 'low' => null, 'medium' => null, 'high' => 'high', 'xhigh' => null, 'max' => null]],
-        'claude-opus-5-5' => ['Claude Opus 5.5 (Antigravity)', 250_000, 64_000, true, true, ['off' => null, 'minimal' => null, 'low' => 'low', 'medium' => 'medium', 'high' => 'high', 'xhigh' => null, 'max' => null]],
-        'claude-sonnet-5-5' => ['Claude Sonnet 5.5 (Antigravity)', 200_000, 64_000, true, true, ['off' => null, 'minimal' => null, 'low' => 'low', 'medium' => 'medium', 'high' => 'high', 'xhigh' => null, 'max' => null]],
+        'claude-opus-5-5' => ['Claude Opus 5.5 (Antigravity)', 250_000, 128_000, true, true, ['off' => null, 'minimal' => null, 'low' => 'low', 'medium' => 'medium', 'high' => 'high', 'xhigh' => null, 'max' => null]],
+        'claude-sonnet-5-5' => ['Claude Sonnet 5.5 (Antigravity)', 200_000, 128_000, true, true, ['off' => null, 'minimal' => null, 'low' => 'low', 'medium' => 'medium', 'high' => 'high', 'xhigh' => null, 'max' => null]],
         'gemini-2.5-pro' => ['Gemini 2.5 Pro (Antigravity)', 1_048_576, 65_535, true, true, ['off' => null, 'minimal' => null, 'low' => null, 'medium' => null, 'high' => 'high', 'xhigh' => null, 'max' => null]],
         'gpt-oss-120b' => ['GPT-OSS 120B (Antigravity)', 131_072, 32_768, true, false, ['off' => null, 'minimal' => null, 'low' => null, 'medium' => 'medium', 'high' => null, 'xhigh' => null, 'max' => null]],
     ];
@@ -92,7 +92,11 @@ final class Models
      * @var array<string, int>
      */
     private const array MAX_OUTPUT_TOKENS = [
+        'gemini-4-neon' => 262_144,
+        'gemini-4-argon' => 65_536,
         'gemini-4-hydrogen' => 262_144,
+        'claude-opus-5-5' => 128_000,
+        'claude-sonnet-5-5' => 128_000,
         'gemini-3.8-flash' => 65_536,
         'gemini-3.7-flash' => 65_536,
         'gemini-3.6-flash' => 65_536,
@@ -105,7 +109,8 @@ final class Models
 
     /**
      * What `Grouping` gives a discovered model whose catalog entry states no limit, before its
-     * family's template (0.14): Gemini 4 Hydrogen takes 262,144 where the template says 65,535.
+     * family's template (0.14, 0.15): Gemini 4 Neon and Hydrogen take 262,144 where the template says
+     * 65,535, and Claude 5.5 takes 128,000.
      */
     public static function maxOutputTokens(string $id): ?int
     {

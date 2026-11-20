@@ -308,7 +308,7 @@ final class AntigravityOauthTest extends TestCase
             '88a6f22d-279f-55e2-bb88-5aedcc8b764b',
             $this->onTheLoop(fn (): string => $this->antigravity($url)->project('ya29.a', null, 'me@example.com')),
         );
-        $this->assertSame(3, $this->server->connections(), 'each of the three endpoints, once');
+        $this->assertSame(2, $this->server->connections(), 'each of the two endpoints, once');
         $this->assertSame('5cbbac7c-3afc-5af4-bd2d-c3fc22ff9d54', AntigravityOauth::defaultProjectId('antigravity-default'));
 
         putenv('ANTIGRAVITY_PROJECT_ID= my-own-project ');

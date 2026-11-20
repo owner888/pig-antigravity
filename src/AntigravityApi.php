@@ -29,6 +29,7 @@ use Pig\Ai\TranscriptContext;
 use Pig\Ai\Usage;
 use Pig\Ai\Utils\Retry;
 use Pig\Ai\Utils\Transcript;
+use Pig\Ai\Utils\Utf8;
 use Pig\Ai\Utils\AssistantMessageEventStream;
 use Pig\Async\AbortSignal;
 use Pig\Async\Async;
@@ -561,34 +562,201 @@ final class AntigravityApi implements StreamApi
     }
 
     /**
-     * pi-antigravity 0.14's `sanitizeSystemPrompt()`: "Neutralize system prompt phrases that
-     * trigger false 429 RESOURCE_EXHAUSTED responses from the Antigravity proxy when paired with
-     * `requestType: "agent"`."
+     * The largest `systemInstruction` some consumer endpoints take before answering a generic 429
+     * RESOURCE_EXHAUSTED — pi-antigravity 0.15's `SYSTEM_INSTRUCTION_PART_LIMIT`: "empirically 126
+     * passes, 127+ fails regardless of wording or splitting across multiple parts."
+     */
+    private const int SYSTEM_INSTRUCTION_PART_LIMIT = 126;
+
+    /**
+     * "Backend-neutral replacement for Pi's default preamble opener. Replacing only the 'running
+     * inside pi' phrase leaves a sentence pair that still matches the backend's prompt classifier on
+     * consumer endpoints; replacing the whole opener sentence group passes when wire-native
+     * `systemInstruction` is retained."
+     */
+    private const string NEUTRAL_OPENER = 'You are a coding agent helping the user with their project.';
+
+    /**
+     * pi-antigravity 0.15's `sanitizeSystemPrompt()`: "Neutralize Pi and Pi-Bolt system prompt
+     * fingerprints that trigger false 429 RESOURCE_EXHAUSTED responses from the Antigravity consumer
+     * proxy when wire-native `systemInstruction` is sent." The whole-opener rewrite runs first.
      *
-     * pig's own prompt has none of them (`SystemPrompt::ROLE` leaves "running inside pi, a coding
-     * agent harness" out), but the prompt sent is also a custom one, an `--append-system-prompt`
-     * and every context file, and any of those can quote pi's.
+     * pig's own prompt has none of them (`SystemPrompt::ROLE` has no "running inside"), but the
+     * prompt sent is also a custom one, an `--append-system-prompt` and every context file, and any
+     * of those can quote pi's.
      */
     public static function sanitizeSystemPrompt(string $text): string
     {
+        // The opener: anchored to the start, and replaced once, as upstream's has neither `g` nor `m`.
+        $text = (string) preg_replace(
+            '/\AYou are a coding assistant running inside [^.]*\.\s*Help users inspect files, run commands, and modify code\./i',
+            self::NEUTRAL_OPENER,
+            $text,
+            1,
+        );
+
         // `\z`, not `$`: JavaScript's `$` does not match before a trailing newline, PCRE's does.
         return (string) preg_replace(
             [
-                '/running inside pi,\s*a coding agent harness/i',
-                '/inside pi,\s*a coding agent harness/i',
-                '/(coding assistant )running inside pi(?=[.,!?;:\s]|\z)(?!\.\w)/i',
-                '/(coding agent )inside pi(?=[.,!?;:\s]|\z)(?!\.\w)/i',
+                '/running inside pi-bolt,\s*a build of pi\s*\(a coding agent harness\)\s*compiled ahead of time/i',
+                '/inside pi-bolt,\s*a build of pi\s*\(a coding agent harness\)\s*compiled ahead of time/i',
+                '/running inside pi(?:-bolt)?,\s*a coding agent harness/i',
+                '/inside pi(?:-bolt)?,\s*a coding agent harness/i',
+                '/(coding assistant )running inside pi(?:-bolt)?(?=[.,!?;:\s]|\z)(?!\.\w)/i',
+                '/(coding agent )inside pi(?:-bolt)?(?=[.,!?;:\s]|\z)(?!\.\w)/i',
                 '/\bpractical,\s*and tool-aware\./i',
+                '/codemode scripts and non-LLM models/i',
             ],
             [
+                'running inside your development environment',
+                'inside your development environment',
                 'running inside your development environment',
                 'inside your development environment',
                 '$1running inside your development environment',
                 '$1inside your development environment',
                 'practical, and tool aware.',
+                'codemode scripts (docs/codemode.md), non-LLM models',
             ],
             $text,
         );
+    }
+
+    /**
+     * pi-antigravity 0.15's `inlineSystemPreference()`: `ANTIGRAVITY_INLINE_SYSTEM=1|true|on` folds the
+     * prompt into the first user turn, `0|false|off` keeps `systemInstruction`, and anything else
+     * leaves it to the cap. `ANTIGRAVITY_PROMPT_GUARD=off`, the earlier workaround's switch, keeps it
+     * when `INLINE_SYSTEM` says nothing.
+     *
+     * @return 'on'|'off'|'auto'
+     */
+    public static function inlineSystemPreference(): string
+    {
+        $raw = strtolower(trim(Discovery::env('INLINE_SYSTEM') ?? ''));
+
+        return match (true) {
+            in_array($raw, ['1', 'true', 'on'], true) => 'on',
+            in_array($raw, ['0', 'false', 'off'], true) => 'off',
+            $raw === '' && strtolower(trim(Discovery::env('PROMPT_GUARD') ?? '')) === 'off' => 'off',
+            default => 'auto',
+        };
+    }
+
+    /**
+     * pi-antigravity 0.15's `shouldInlineSystem()`: "Some consumer endpoints answer a
+     * `systemInstruction` exceeding 126 characters (whether in a single part or split across multiple
+     * parts) with a generic 429 RESOURCE_EXHAUSTED regardless of wording, while accepting the identical
+     * text inside `contents` at any length." Counted in characters across every part.
+     *
+     * @param list<array{text: string}> $parts
+     */
+    public static function shouldInlineSystem(array $parts): bool
+    {
+        return match (self::inlineSystemPreference()) {
+            'on' => true,
+            'off' => false,
+            default => array_sum(array_map(static fn (array $part): int => mb_strlen($part['text']), $parts)) > self::SYSTEM_INSTRUCTION_PART_LIMIT,
+        };
+    }
+
+    /**
+     * pi-antigravity 0.15's `inlineSystemInstruction()`: the system parts, joined, become the first
+     * part of the first user turn, or a user turn of their own ahead of a transcript that does not
+     * start with one. (Upstream also drops a placeholder turn its `buildRequest()` injected; pig
+     * injects none.)
+     *
+     * @param list<array{role: string, parts: list<array<string, mixed>>}> $contents
+     * @param list<array{text: string}> $parts
+     * @return list<array{role: string, parts: list<array<string, mixed>>}>
+     */
+    public static function inlineSystemInstruction(array $contents, array $parts): array
+    {
+        $text = Utf8::sanitize(implode("\n\n", array_map(static fn (array $part): string => $part['text'], $parts)));
+
+        if ($text === '') {
+            return $contents;
+        }
+
+        if (($contents[0]['role'] ?? null) === 'user') {
+            $contents[0]['parts'] = [['text' => $text], ...$contents[0]['parts']];
+
+            return $contents;
+        }
+
+        return [['role' => 'user', 'parts' => [['text' => $text]]], ...$contents];
+    }
+
+    /**
+     * pi-antigravity 0.15 (#156, #157): "Claude and GPT-OSS backends require every functionCall in a
+     * model turn to have a matching functionResponse at the start of the immediately following user
+     * turn before any inlineData/text parts. When parallel tool results include images or an earlier
+     * turn was interrupted before its toolResult was recorded, keep all functionResponse parts
+     * contiguous first and synthesize missing responses." Otherwise the backend answers 400
+     * `tool_use ids were found without tool_result blocks`.
+     *
+     * The last turn is left alone: its calls are the ones being answered now.
+     *
+     * @param list<array{role: string, parts: list<array<string, mixed>>}> $contents
+     * @return list<array{role: string, parts: list<array<string, mixed>>}>
+     */
+    public static function pairToolResults(array $contents, string $modelId, string $runtime): array
+    {
+        // Upstream's `toolCallIdNeeded()`.
+        $needed = false;
+
+        foreach ([$modelId, $runtime] as $id) {
+            $needed = $needed || str_starts_with($id, 'claude-') || str_starts_with($id, 'gpt-oss-');
+        }
+
+        if (!$needed) {
+            return $contents;
+        }
+
+        // `count()` each time round: a turn inserted below is walked past like any other.
+        for ($index = 0; $index < count($contents) - 1; $index++) {
+            if ($contents[$index]['role'] !== 'model') {
+                continue;
+            }
+
+            $calls = array_values(array_filter($contents[$index]['parts'], static fn (array $part): bool => isset($part['functionCall'])));
+
+            if ($calls === []) {
+                continue;
+            }
+
+            if ($contents[$index + 1]['role'] !== 'user') {
+                array_splice($contents, $index + 1, 0, [['role' => 'user', 'parts' => []]]);
+            }
+
+            $next = $contents[$index + 1]['parts'];
+            $responses = array_values(array_filter($next, static fn (array $part): bool => isset($part['functionResponse'])));
+            $rest = array_values(array_filter($next, static fn (array $part): bool => !isset($part['functionResponse'])));
+            $answered = [];
+
+            foreach ($responses as $part) {
+                $id = (string) ($part['functionResponse']['id'] ?? '');
+
+                if ($id !== '') {
+                    $answered[$id] = true;
+                }
+            }
+
+            foreach ($calls as $part) {
+                $id = (string) ($part['functionCall']['id'] ?? '');
+
+                if ($id !== '' && !isset($answered[$id])) {
+                    $responses[] = ['functionResponse' => [
+                        'name' => $part['functionCall']['name'],
+                        'id' => $id,
+                        'response' => ['error' => 'Tool execution was interrupted before a result was recorded.'],
+                    ]];
+                    $answered[$id] = true;
+                }
+            }
+
+            $contents[$index + 1]['parts'] = [...$responses, ...$rest];
+        }
+
+        return $contents;
     }
 
     /**
@@ -614,7 +782,7 @@ final class AntigravityApi implements StreamApi
             $runtime = $resolved;
         }
 
-        $inner = ['contents' => GoogleShared::contents($model, $context)];
+        $inner = ['contents' => self::pairToolResults(GoogleShared::contents($model, $context), $model->id, $runtime)];
         $config = [];
 
         if ($options?->temperature !== null) {
@@ -633,7 +801,14 @@ final class AntigravityApi implements StreamApi
         $tools = Transcript::getCurrentTools($context->messages);
 
         if ($systemPrompt !== '') {
-            $inner['systemInstruction'] = GoogleShared::systemInstruction(self::sanitizeSystemPrompt($systemPrompt));
+            $instruction = GoogleShared::systemInstruction(self::sanitizeSystemPrompt($systemPrompt));
+
+            // pi-antigravity 0.15: over the consumer cap, or when forced, the prompt goes in `contents`.
+            if (self::shouldInlineSystem($instruction['parts'])) {
+                $inner['contents'] = self::inlineSystemInstruction($inner['contents'], $instruction['parts']);
+            } else {
+                $inner['systemInstruction'] = $instruction;
+            }
         }
 
         if ($tools !== []) {

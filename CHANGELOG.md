@@ -6,9 +6,24 @@ is in step with.
 
 ## Unreleased
 
+In step with pi-antigravity 0.15.0.
+
+### Added
+
+- A system prompt over 126 characters is moved into the first user message and `systemInstruction` is left out, as pi-antigravity 0.15 does: some consumer endpoints (`cloudcode-pa` among them) answer a longer `systemInstruction` with a generic 429 `RESOURCE_EXHAUSTED` — which reads as "This model is unavailable right now" — whatever it says, and take the same text inside the conversation at any length. pig's own prompt is far longer than that. `ANTIGRAVITY_INLINE_SYSTEM=1|true|on` always moves it, `0|false|off` (or `ANTIGRAVITY_PROMPT_GUARD=off`) never does.
+- Gemini 4 Neon is offered although Google's picker does not list it yet, as Hydrogen and Oxygen are; Neon is given 262,144 output tokens, Argon 65,536, and Claude Opus 5.5 and Sonnet 5.5 128,000 (they were 64,000), where the catalog states no limit.
+- A warning in both READMEs on Section 6 of the Google Antigravity Additional Terms of Service, under which Google has suspended accounts used through third-party software.
+
 ### Changed
 
+- The catalog, the usage read and the sign-in ask two endpoints, `daily-cloudcode-pa` and then `cloudcode-pa`; the `daily-cloudcode-pa.sandbox` host no longer answers and is not asked.
+- The system prompt is neutralized of more of pi's and Pi-Bolt's wording before it is sent, as pi-antigravity 0.15 does: their whole opening sentences become "You are a coding agent helping the user with their project.", and pi 1.5.2's "codemode scripts and non-LLM models" line is reworded. pig's own prompt has none of them; a custom prompt or a context file can.
 - A 429 that names no limit ("This model is unavailable right now (Resource has been exhausted …)") now says the request was stopped and not sent again, and to wait a while before sending again, as a throttle does. It used to say to switch to `gemini-3.8-flash` at once and that this was "not necessarily an account quota wall" — pi-antigravity's words, which invite sending another request on the same account right after a 429. Not pi-antigravity's wording.
+- Two parts of pi-antigravity 0.15 are left out on purpose: its capacity ladder (a generic 429 or a 503 "No capacity available" retried on every endpoint and sibling tier after 3, 8, 15 and 25 seconds) with the route cache that remembers where it landed, because a 429 ends the request here and pig's session already retries a 503; and its cold-start lookup of a grouped model's tier by effort, because pig has no per-request model lookup and its routing tables come from the catalog.
+
+### Fixed
+
+- Claude and GPT-OSS no longer fail with `tool_use ids were found without tool_result blocks` after a turn whose tool call was interrupted before its result was recorded, or whose results came with images: every call's response goes first in the turn after it, and a call with none is answered "Tool execution was interrupted before a result was recorded.", as pi-antigravity 0.15 does.
 
 ## [0.14.3] - 2026-11-19
 

@@ -575,6 +575,41 @@ final class AntigravityDiscoveryTest extends TestCase
         $this->assertSame(['input' => 5.0, 'output' => 25.0, 'cacheRead' => 0.5, 'cacheWrite' => 6.25], \PigAntigravity\Models::cost('claude-opus-5-5'));
     }
 
+    /** pi-antigravity 0.15, `test-model-discovery.ts`: Gemini 4 Neon passes the filter, and the new models' limits. */
+    public function testGemini4NeonIsSelectableAndTheNewModelsKeepTheirOwnLimits(): void
+    {
+        $catalog = Grouping::buildAntigravityCatalog(
+            [
+                // Recommended, so the filter keeps something and Neon is kept only by name.
+                'gemini-3.8-flash-low' => ['displayName' => 'Gemini 3.8 Flash (Low)'],
+                'gemini-4-neon-low' => ['displayName' => 'Gemini 4 Neon (Low)'],
+                'gemini-4-neon-high' => ['displayName' => 'Gemini 4 Neon (High)'],
+                'gemini-4-neon-xhigh' => ['displayName' => 'Gemini 4 Neon (XHigh)'],
+            ],
+            Discovery::fallbackCatalog(),
+            [['displayName' => 'Recommended', 'groups' => [['modelIds' => ['gemini-3.8-flash-low']]]]],
+        );
+
+        $byId = array_column($catalog['models'], null, 'id');
+        $this->assertArrayHasKey('gemini-4-neon', $byId);
+        $this->assertSame('gemini-4-neon-xhigh', $catalog['routing']['gemini-4-neon']['routing']['xhigh']);
+        $this->assertSame(262_144, $byId['gemini-4-neon']['maxTokens'], 'its own limit, not the family template\'s');
+
+        $this->assertSame(262_144, \PigAntigravity\Models::maxOutputTokens('gemini-4-neon'));
+        $this->assertSame(65_536, \PigAntigravity\Models::maxOutputTokens('gemini-4-argon'));
+        $this->assertSame(128_000, \PigAntigravity\Models::maxOutputTokens('claude-opus-5-5'));
+        $this->assertSame(128_000, \PigAntigravity\Models::maxOutputTokens('claude-sonnet-5-5'));
+
+        $fallback = [];
+
+        foreach (\PigAntigravity\Models::fallback() as $model) {
+            $fallback[$model->id] = $model->maxTokens;
+        }
+
+        $this->assertSame(128_000, $fallback['claude-opus-5-5']);
+        $this->assertSame(128_000, $fallback['claude-sonnet-5-5']);
+    }
+
     public function testTheIntervalTheEndpointAndTheKeyAreReadAsUpstreamReadsThem(): void
     {
         $this->assertSame(4 * 60 * 60 * 1000, Discovery::catalogRefreshIntervalMs());
@@ -583,7 +618,8 @@ final class AntigravityDiscoveryTest extends TestCase
         putenv('ANTIGRAVITY_CATALOG_REFRESH_INTERVAL_MS=-5');
         $this->assertSame(Discovery::DEFAULT_CATALOG_REFRESH_INTERVAL_MS, Discovery::catalogRefreshIntervalMs());
 
-        $this->assertSame(Discovery::ENDPOINT_FALLBACKS, Discovery::endpointCandidates());
+        // 0.15 dropped the sandbox host, which no longer answers.
+        $this->assertSame(['https://daily-cloudcode-pa.googleapis.com', 'https://cloudcode-pa.googleapis.com'], Discovery::endpointCandidates());
         putenv('ANTIGRAVITY_BASE_URL=https://autopush-cloudcode-pa.sandbox.googleapis.com/');
         $this->assertSame(['https://autopush-cloudcode-pa.sandbox.googleapis.com'], Discovery::endpointCandidates());
 

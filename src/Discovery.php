@@ -47,10 +47,9 @@ final class Discovery
     /** pi-antigravity's `ANTIGRAVITY_API`, which its stored models carry. */
     public const string API = 'antigravity-api';
 
-    /** pi-antigravity's `ENDPOINT_FALLBACKS`. */
+    /** pi-antigravity's `ENDPOINT_FALLBACKS`; 0.15 dropped `daily-cloudcode-pa.sandbox`, which no longer answers (#146). */
     public const array ENDPOINT_FALLBACKS = [
         'https://daily-cloudcode-pa.googleapis.com',
-        'https://daily-cloudcode-pa.sandbox.googleapis.com',
         'https://cloudcode-pa.googleapis.com',
     ];
 

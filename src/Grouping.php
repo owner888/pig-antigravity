@@ -85,12 +85,12 @@ final class Grouping
     }
 
     /**
-     * pi-antigravity 0.14's `isExtraAllowedModelId()`: the Gemini 4 Hydrogen and Oxygen variants
+     * pi-antigravity 0.15's `isExtraAllowedModelId()`: the Gemini 4 Neon, Hydrogen and Oxygen variants
      * are selectable although the picker's lists (`agentModelSorts`) do not name them yet.
      */
     public static function isExtraAllowedModelId(string $runtimeId): bool
     {
-        return preg_match('/(?:^|-)(?:hydrogen|oxygen)(?:-|$)/i', $runtimeId) === 1;
+        return preg_match('/(?:^|-)(?:neon|hydrogen|oxygen)(?:-|$)/i', $runtimeId) === 1;
     }
 
     /**

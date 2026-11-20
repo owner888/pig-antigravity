@@ -283,27 +283,203 @@ final class AntigravityApiTest extends TestCase
         $this->assertSame($first, $this->server->receivedJson()['request']['labels']['trajectory_id']);
     }
 
-    /** pi-antigravity 0.14 (#137, #139, #142): phrases the proxy answers with a false 429. */
+    /** pi-antigravity 0.14 and 0.15 (#137, #139, #142, #145, #147, #155): phrases the proxy answers with a false 429. */
     public function testPromptPhrasesTheProxyRejectsAreNeutralizedOnTheWayOut(): void
     {
         $this->send('gemini-3-flash', 'low', new Context(
             [new UserMessage('hello')],
             'You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.',
         ));
+        // Neutralized first, and then short enough to stay where it was.
         $this->assertSame(
-            'You are a coding assistant running inside your development environment. Help users inspect files, run commands, and modify code.',
+            'You are a coding agent helping the user with their project.',
             $this->server->receivedJson()['request']['systemInstruction']['parts'][0]['text'],
         );
 
-        $this->assertSame('You are a coding assistant running inside your development environment. Be brief.', \PigAntigravity\AntigravityApi::sanitizeSystemPrompt('You are a coding assistant running inside pi. Be brief.'));
-        $this->assertSame('Keep files running inside pi.js untouched.', \PigAntigravity\AntigravityApi::sanitizeSystemPrompt('Keep files running inside pi.js untouched.'));
-        $this->assertSame('Notes on running inside pig, a coding agent harness.', \PigAntigravity\AntigravityApi::sanitizeSystemPrompt('Notes on running inside pig, a coding agent harness.'), 'pig is not pi');
+        $sanitize = static fn (string $text): string => \PigAntigravity\AntigravityApi::sanitizeSystemPrompt($text);
+        $cases = [
+            // Stock pi, Pi-Bolt and an already-sanitized opener all become the neutral one.
+            "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n- read: Read file contents\n"
+                => "You are a coding agent helping the user with their project.\n\n<tools>\n- read: Read file contents\n",
+            'You are a coding assistant running inside Pi-Bolt, a build of pi (a coding agent harness) compiled ahead of time. Help users inspect files, run commands, and modify code. Be brief.'
+                => 'You are a coding agent helping the user with their project. Be brief.',
+            'You are a coding assistant running inside your development environment. Help users inspect files, run commands, and modify code.'
+                => 'You are a coding agent helping the user with their project.',
+            // Scattered phrases, and a file name left alone.
+            'You are a coding assistant running inside Pi-Bolt. Be brief.' => 'You are a coding assistant running inside your development environment. Be brief.',
+            'A coding agent inside Pi-Bolt should be concise.' => 'A coding agent inside your development environment should be concise.',
+            'inside Pi-Bolt, a build of pi (a coding agent harness) compiled ahead of time' => 'inside your development environment',
+            'You are a coding assistant running inside pi-bolt.js untouched.' => 'You are a coding assistant running inside pi-bolt.js untouched.',
+            'You are a coding assistant running inside pi. Be brief.' => 'You are a coding assistant running inside your development environment. Be brief.',
+            'Keep files running inside pi.js untouched.' => 'Keep files running inside pi.js untouched.',
+            'Notes on running inside pig, a coding agent harness.' => 'Notes on running inside pig, a coding agent harness.',
+            'Be direct, practical, and tool-aware.' => 'Be direct, practical, and tool aware.',
+            // pi 1.5.2's <docs> line, with `- codemode:`, `CodeModel` and the path kept.
+            "<tools>\n- codemode: Run JavaScript (CodeModel)\n</tools>\n<docs>\n- When asked about: codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n</docs>"
+                => "<tools>\n- codemode: Run JavaScript (CodeModel)\n</tools>\n<docs>\n- When asked about: codemode scripts (docs/codemode.md), non-LLM models such as classifiers and image models (docs/codemode.md)\n</docs>",
+            // pig's own opener has no "running inside", and is not rewritten.
+            'You are a coding assistant. Help users inspect files, run commands, and modify code.' => 'You are a coding assistant. Help users inspect files, run commands, and modify code.',
+        ];
 
-        foreach (['You are a coding assistant RUNNING INSIDE PI.', 'A coding agent inside pi should be concise.', "A coding agent inside pi\n"] as $variant) {
-            $this->assertDoesNotMatchRegularExpression('/inside pi\b/i', \PigAntigravity\AntigravityApi::sanitizeSystemPrompt($variant), $variant);
+        foreach ($cases as $input => $expected) {
+            $this->assertSame($expected, $sanitize($input), $input);
         }
 
-        $this->assertSame('Be direct, practical, and tool aware.', \PigAntigravity\AntigravityApi::sanitizeSystemPrompt('Be direct, practical, and tool-aware.'));
+        foreach (['You are a coding assistant RUNNING INSIDE PI.', 'A coding agent inside pi should be concise.', "A coding agent inside pi\n"] as $variant) {
+            $this->assertDoesNotMatchRegularExpression('/inside pi\b/i', $sanitize($variant), $variant);
+        }
+    }
+
+    // ---- the system prompt over the consumer cap (pi-antigravity 0.15, #148, #152, #153, #160, #161) ----
+
+    public function testAPromptOverTheCapIsFoldedIntoTheFirstUserTurn(): void
+    {
+        $prompt = str_repeat('You are a coding assistant. ', 10);
+        $this->send('gemini-3-flash', 'low', new Context([new UserMessage('hello')], $prompt));
+        $inner = $this->server->receivedJson()['request'];
+
+        $this->assertArrayNotHasKey('systemInstruction', $inner);
+        $this->assertSame([['text' => $prompt], ['text' => 'hello']], $inner['contents'][0]['parts']);
+        $this->assertSame('user', $inner['contents'][0]['role']);
+    }
+
+    public function testAPromptAtTheCapStaysWhereItIs(): void
+    {
+        $prompt = str_repeat('x', 126);
+        $this->send('gemini-3-flash', 'low', new Context([new UserMessage('hello')], $prompt));
+        $inner = $this->server->receivedJson()['request'];
+
+        $this->assertSame($prompt, $inner['systemInstruction']['parts'][0]['text']);
+        $this->assertSame([['text' => 'hello']], $inner['contents'][0]['parts']);
+
+        $this->assertFalse(\PigAntigravity\AntigravityApi::shouldInlineSystem([['text' => str_repeat('x', 126)]]));
+        $this->assertTrue(\PigAntigravity\AntigravityApi::shouldInlineSystem([['text' => str_repeat('x', 127)]]));
+        // Characters, not bytes.
+        $this->assertFalse(\PigAntigravity\AntigravityApi::shouldInlineSystem([['text' => str_repeat('提', 126)]]));
+        // Across parts.
+        $this->assertTrue(\PigAntigravity\AntigravityApi::shouldInlineSystem([['text' => str_repeat('x', 100)], ['text' => str_repeat('x', 27)]]));
+    }
+
+    public function testTheEnvironmentCanForceEitherShape(): void
+    {
+        $api = \PigAntigravity\AntigravityApi::class;
+
+        try {
+            self::clearInlineSystemEnv();
+            $this->assertSame('auto', $api::inlineSystemPreference());
+
+            foreach (['1', 'true', 'TRUE', 'on', ' On '] as $on) {
+                putenv("ANTIGRAVITY_INLINE_SYSTEM={$on}");
+                $this->assertSame('on', $api::inlineSystemPreference(), $on);
+            }
+
+            foreach (['0', 'false', 'off'] as $off) {
+                putenv("ANTIGRAVITY_INLINE_SYSTEM={$off}");
+                $this->assertSame('off', $api::inlineSystemPreference(), $off);
+            }
+
+            foreach (['', '  ', 'no', '2', 'auto'] as $auto) {
+                putenv("ANTIGRAVITY_INLINE_SYSTEM={$auto}");
+                $this->assertSame('auto', $api::inlineSystemPreference(), "'{$auto}'");
+            }
+
+            self::clearInlineSystemEnv();
+            putenv('NOAGY_INLINE_SYSTEM=1');
+            $this->assertSame('on', $api::inlineSystemPreference());
+            putenv('NOAGY_INLINE_SYSTEM=0');
+            $this->assertSame('off', $api::inlineSystemPreference());
+
+            // The earlier workaround's switch, when INLINE_SYSTEM says nothing.
+            self::clearInlineSystemEnv();
+            putenv('ANTIGRAVITY_PROMPT_GUARD=off');
+            $this->assertSame('off', $api::inlineSystemPreference());
+            putenv('ANTIGRAVITY_INLINE_SYSTEM=1');
+            $this->assertSame('on', $api::inlineSystemPreference());
+            self::clearInlineSystemEnv();
+            putenv('NOAGY_PROMPT_GUARD=off');
+            $this->assertSame('off', $api::inlineSystemPreference());
+
+            // Forced on, a short prompt folds; forced off, a long one stays.
+            self::clearInlineSystemEnv();
+            putenv('ANTIGRAVITY_INLINE_SYSTEM=1');
+            $this->send('gemini-3-flash', 'low', new Context([new UserMessage('hello')], 'be brief'));
+            $this->assertArrayNotHasKey('systemInstruction', $this->server->receivedJson()['request']);
+
+            putenv('ANTIGRAVITY_INLINE_SYSTEM=off');
+            $this->server = new CannedServer();
+            $long = str_repeat('y', 300);
+            $this->send('gemini-3-flash', 'low', new Context([new UserMessage('hello')], $long));
+            $this->assertSame($long, $this->server->receivedJson()['request']['systemInstruction']['parts'][0]['text']);
+        } finally {
+            self::clearInlineSystemEnv();
+        }
+    }
+
+    public function testFoldingPutsThePromptAheadOfTheFirstTurnWhateverItIs(): void
+    {
+        $fold = static fn (array $turns, array $parts): array => \PigAntigravity\AntigravityApi::inlineSystemInstruction($turns, $parts);
+
+        $this->assertSame([['role' => 'user', 'parts' => [['text' => 'SYS'], ['text' => 'hi']]]], $fold([['role' => 'user', 'parts' => [['text' => 'hi']]]], [['text' => 'SYS']]));
+        $this->assertSame(
+            [['role' => 'user', 'parts' => [['text' => 'SYS']]], ['role' => 'model', 'parts' => [['text' => 'm']]]],
+            $fold([['role' => 'model', 'parts' => [['text' => 'm']]]], [['text' => 'SYS']]),
+            'no leading user turn: a new one goes first',
+        );
+        $this->assertSame([['role' => 'user', 'parts' => [['text' => 'SYS']]]], $fold([], [['text' => 'SYS']]));
+        $this->assertSame([['role' => 'user', 'parts' => [['text' => "A\n\nB"], ['text' => 'hi']]]], $fold([['role' => 'user', 'parts' => [['text' => 'hi']]]], [['text' => 'A'], ['text' => 'B']]));
+        $this->assertSame([['role' => 'user', 'parts' => [['text' => 'hi']]]], $fold([['role' => 'user', 'parts' => [['text' => 'hi']]]], []), 'no system parts: nothing changes');
+    }
+
+    // ---- tool results for Claude and gpt-oss (pi-antigravity 0.15, #156, #157) ----------------
+
+    public function testEveryCallGetsItsResponseFirstInTheTurnAfterIt(): void
+    {
+        $call = static fn (string $id): array => ['functionCall' => ['name' => 'read', 'args' => [], 'id' => $id]];
+        $response = static fn (string $id): array => ['functionResponse' => ['name' => 'read', 'id' => $id, 'response' => ['output' => 'x']]];
+        $interrupted = static fn (string $id): array => ['functionResponse' => ['name' => 'read', 'id' => $id, 'response' => ['error' => 'Tool execution was interrupted before a result was recorded.']]];
+        $pair = static fn (array $contents, string $model = 'claude-sonnet-5-5', string $runtime = 'claude-sonnet-5-5-low'): array => \PigAntigravity\AntigravityApi::pairToolResults($contents, $model, $runtime);
+
+        $image = ['inlineData' => ['mimeType' => 'image/png', 'data' => 'AA==']];
+        $contents = [
+            ['role' => 'model', 'parts' => [$call('a'), $call('b')]],
+            ['role' => 'user', 'parts' => [['text' => 'note'], $image, $response('a')]],
+        ];
+
+        // The responses first, the missing one made up, the rest after them in their order.
+        $this->assertSame([
+            $contents[0],
+            ['role' => 'user', 'parts' => [$response('a'), $interrupted('b'), ['text' => 'note'], $image]],
+        ], $pair($contents));
+
+        // A call turn followed by another model turn gets a user turn of its own.
+        $this->assertSame([
+            ['role' => 'model', 'parts' => [$call('a')]],
+            ['role' => 'user', 'parts' => [$interrupted('a')]],
+            ['role' => 'model', 'parts' => [['text' => 'went on']]],
+        ], $pair([['role' => 'model', 'parts' => [$call('a')]], ['role' => 'model', 'parts' => [['text' => 'went on']]]]));
+
+        // The last turn's calls are the ones being answered now, and gpt-oss is held to the same.
+        $pending = [['role' => 'user', 'parts' => [['text' => 'go']]], ['role' => 'model', 'parts' => [$call('a')]]];
+        $this->assertSame($pending, $pair($pending, 'gpt-oss-120b', 'gpt-oss-120b-medium'));
+
+        // Gemini is not touched.
+        $this->assertSame($contents, $pair($contents, 'gemini-3-flash', 'gemini-3-flash'));
+        // A runtime that is Claude is enough.
+        $this->assertNotSame($contents, $pair($contents, 'custom-name', 'claude-opus-5-5-high'));
+
+        // On the wire: a call whose turn was interrupted, then a new message.
+        $called = new AssistantMessage([new \Pig\Ai\ToolCall('call-1', 'read', ['path' => 'a'])], Api::Extension, 'antigravity', 'claude-sonnet-5-5', new \Pig\Ai\Usage(), StopReason::ToolUse);
+        $this->send('claude-sonnet-5-5', 'low', new Context([new UserMessage('read a'), $called, new UserMessage('never mind')]));
+        $sent = $this->server->receivedJson()['request']['contents'];
+        $this->assertSame('call-1', $sent[1]['parts'][0]['functionCall']['id']);
+        $this->assertSame('call-1', $sent[2]['parts'][0]['functionResponse']['id']);
+    }
+
+    private static function clearInlineSystemEnv(): void
+    {
+        foreach (['ANTIGRAVITY_INLINE_SYSTEM', 'NOAGY_INLINE_SYSTEM', 'ANTIGRAVITY_PROMPT_GUARD', 'NOAGY_PROMPT_GUARD'] as $name) {
+            putenv($name);
+        }
     }
 
     public function testTheGeminiRequestIsStillInsideTheEnvelope(): void

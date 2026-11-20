@@ -1,6 +1,6 @@
 # pig-antigravity
 
-给 [pig](https://github.com/owner888/pig) 编程智能体用的 Google Antigravity：用 Antigravity 订阅跑 Gemini、Claude 和 GPT-OSS，不走按量计费的 API key。它是 [pi-antigravity](https://github.com/Rahularya01/pi-antigravity) 的 PHP 移植，跟随其版本同步（当前 0.14.0）。
+给 [pig](https://github.com/owner888/pig) 编程智能体用的 Google Antigravity：用 Antigravity 订阅跑 Gemini、Claude 和 GPT-OSS，不走按量计费的 API key。它是 [pi-antigravity](https://github.com/Rahularya01/pi-antigravity) 的 PHP 移植，跟随其版本同步（当前 0.15.0）。
 
 [English](README.md)
 
@@ -15,6 +15,9 @@ pig install git:github.com/owner888/pig-antigravity
 ## 使用前须知
 
 这不是 Google 官方集成。请求按 Antigravity CLI 的方式发往 Google 的 Code Assist 后端，Google 可能因此限制或停用以这种方式使用订阅的账号。请用你承受得起失去访问权的账号。
+
+> [!WARNING]
+> Google Antigravity 附加服务条款第 6 节禁止用第三方软件访问面向个人用户的 Antigravity OAuth 端点，Google 已因此暂停或停用过一些个人账号（[pi-antigravity#154](https://github.com/Rahularya01/pi-antigravity/issues/154)）。如果你的账号必须保持合规，请使用官方的 `agy` CLI 或已授权的 Gemini Enterprise。
 
 登录默认使用 Google 公开的 Antigravity 桌面 OAuth 客户端，与 pi-antigravity 相同，无需事先配置。要用自己的客户端，在环境变量里同时设置 `ANTIGRAVITY_CLIENT_ID` 和 `ANTIGRAVITY_CLIENT_SECRET`，或在 pig 的 `settings.json` 里同时设置 `antigravity.clientId` 和 `antigravity.clientSecret`。
 
@@ -66,10 +69,11 @@ pig --model antigravity/gemini-3.8-flash
 | `ANTIGRAVITY_CLIENT_ID`、`ANTIGRAVITY_CLIENT_SECRET` | 用自己的 OAuth 客户端替代内置的（见上） |
 | `ANTIGRAVITY_PROJECT_ID` | Google 没有给出 Cloud 项目时，登录所用的项目 id；不设则由账号邮箱推算出一个 |
 | `ANTIGRAVITY_USER_AGENT` | 替换请求携带的 Antigravity CLI `User-Agent`。后端只对较新的 CLI 版本展示较新的模型 |
-| `ANTIGRAVITY_BASE_URL` | 只向这一个 `https://*.googleapis.com` 端点询问目录，而不是默认的三个 |
+| `ANTIGRAVITY_BASE_URL` | 只向这一个 `https://*.googleapis.com` 端点询问目录，而不是默认的两个 |
 | `ANTIGRAVITY_CATALOG_REFRESH_INTERVAL_MS` | 已保存的目录复用多久（默认四小时；`0` 表示每次都问） |
 | `ANTIGRAVITY_NO_EXTRA_TOOLS`、`ANTIGRAVITY_NO_SEARCH_TOOL`、`ANTIGRAVITY_NO_FETCH_TOOL`、`ANTIGRAVITY_NO_IMAGE_TOOL` | 设为 `1` 时不注册对应工具；provider 和斜杠命令保留 |
 | `ANTIGRAVITY_WEB_FETCH_MAX_CHARS` | `read_url_content` 返回页面的多少个字符（默认 60000）；其余在另存的文件里 |
+| `ANTIGRAVITY_INLINE_SYSTEM` | 系统提示词放在哪里。部分面向个人用户的端点遇到超过 126 个字符的 `systemInstruction` 会回一个通用的 429，而同样的文字放进对话里多长都接受，所以默认把较长的提示词移进第一条用户消息。`1`/`true`/`on` 总是移进去，`0`/`false`/`off`（或 `ANTIGRAVITY_PROMPT_GUARD=off`）从不移 |
 | `ANTIGRAVITY_USE_CREDITS` | `1`/`0` 打开或关闭 Google One AI 额度超量，优先于设置文件 |
 | `ANTIGRAVITY_LOCATION`、`ANTIGRAVITY_ENTERPRISE_PROJECT`、`ANTIGRAVITY_USER_TIER` | Gemini Enterprise：`eu` 或 `us`（或用 `ANTIGRAVITY_ENTERPRISE=1` 表示 `global`）时，对话只发往该地区的 Business AI Code 主机，并带上许可证的 Cloud 项目 id 和等级。不会回退到普通端点，开启期间拒绝生成图片 |
 | `PIG_OFFLINE` | 设置后不再通过网络询问目录 |

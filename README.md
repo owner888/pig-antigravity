@@ -1,6 +1,6 @@
 # pig-antigravity
 
-Google Antigravity for the [pig](https://github.com/owner888/pig) coding agent: Gemini, Claude and GPT-OSS on an Antigravity subscription instead of a metered API key. A PHP port of [pi-antigravity](https://github.com/Rahularya01/pi-antigravity), kept in step with its releases (currently 0.14.0).
+Google Antigravity for the [pig](https://github.com/owner888/pig) coding agent: Gemini, Claude and GPT-OSS on an Antigravity subscription instead of a metered API key. A PHP port of [pi-antigravity](https://github.com/Rahularya01/pi-antigravity), kept in step with its releases (currently 0.15.0).
 
 [中文](README.zh-CN.md)
 
@@ -15,6 +15,9 @@ No Composer dependencies. Antigravity was bundled with pig until it became this 
 ## Before you use it
 
 This is not an official Google integration. Requests go to Google's Code Assist backend the way the Antigravity CLI sends them, and Google may limit or suspend an account that uses a subscription this way. Use an account you can afford to lose access with.
+
+> [!WARNING]
+> Section 6 of the Google Antigravity Additional Terms of Service prohibits using third-party software to access the consumer Antigravity OAuth endpoints, and Google has suspended or disabled consumer accounts for doing so ([pi-antigravity#154](https://github.com/Rahularya01/pi-antigravity/issues/154)). If your account has to stay compliant, use the official `agy` CLI or a licensed Gemini Enterprise setup.
 
 Sign-in uses Google's public Antigravity desktop OAuth client, as pi-antigravity does; nothing has to be set up first. To use your own, set both `ANTIGRAVITY_CLIENT_ID` and `ANTIGRAVITY_CLIENT_SECRET` in the environment, or both `antigravity.clientId` and `antigravity.clientSecret` in pig's `settings.json`.
 
@@ -66,10 +69,11 @@ Signing in again with another Google account keeps the first one. Switching betw
 | `ANTIGRAVITY_CLIENT_ID`, `ANTIGRAVITY_CLIENT_SECRET` | Your own OAuth client instead of the built-in one (see above) |
 | `ANTIGRAVITY_PROJECT_ID` | The Cloud project id a sign-in is given when Google names none, instead of one derived from the account's email |
 | `ANTIGRAVITY_USER_AGENT` | Replaces the Antigravity CLI `User-Agent` requests carry. The backend shows newer models only to newer CLI versions |
-| `ANTIGRAVITY_BASE_URL` | One `https://*.googleapis.com` endpoint for the catalog instead of the usual three |
+| `ANTIGRAVITY_BASE_URL` | One `https://*.googleapis.com` endpoint for the catalog instead of the usual two |
 | `ANTIGRAVITY_CATALOG_REFRESH_INTERVAL_MS` | How long a stored catalog is reused (default four hours; `0` asks every time) |
 | `ANTIGRAVITY_NO_EXTRA_TOOLS`, `ANTIGRAVITY_NO_SEARCH_TOOL`, `ANTIGRAVITY_NO_FETCH_TOOL`, `ANTIGRAVITY_NO_IMAGE_TOOL` | `1` keeps the tools from being registered; the provider and the slash commands stay |
 | `ANTIGRAVITY_WEB_FETCH_MAX_CHARS` | How many characters of a page `read_url_content` returns (default 60000); the rest is in the saved file |
+| `ANTIGRAVITY_INLINE_SYSTEM` | Where the system prompt goes. Some consumer endpoints answer a `systemInstruction` over 126 characters with a generic 429, and take the same text inside the conversation at any length, so a longer prompt is moved into the first user message by default. `1`/`true`/`on` always moves it, `0`/`false`/`off` (or `ANTIGRAVITY_PROMPT_GUARD=off`) never does |
 | `ANTIGRAVITY_USE_CREDITS` | `1`/`0` turns Google One AI credit overages on or off, over what the settings say |
 | `ANTIGRAVITY_LOCATION`, `ANTIGRAVITY_ENTERPRISE_PROJECT`, `ANTIGRAVITY_USER_TIER` | Gemini Enterprise: `eu` or `us` (or `ANTIGRAVITY_ENTERPRISE=1` for `global`) sends chat only to that location's Business AI Code host, with the license's Cloud project id and tier. Nothing falls back to the consumer endpoint, and image generation is refused while it is on |
 | `PIG_OFFLINE` | Set: the catalog is never asked for over the network |
