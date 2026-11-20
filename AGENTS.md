@@ -38,7 +38,8 @@ this says how it is worked on. Keep this file under 100 lines.
   for a 429 only, so a 502/503 keeps its number and is still retried.
 - **Where the wording is not upstream's on purpose**: a 403 for a suspended account ("disabled
   in this account for violation of Terms of Service") says to appeal, not to re-login; a
-  throttling 429 says it was stopped, not "retrying automatically".
+  throttling 429 says it was stopped, not "retrying automatically"; a 429 that names no limit
+  ("this model is unavailable right now") says to wait, not to switch to a Flash model at once.
 - **A 429 ends it, everywhere, with no switch to turn that off** — the developer's choice, where
   upstream goes on to the other endpoint, a sibling tier, the next model or the next account.
   One request, then the person decides: chat (`AntigravityApi::send()`), and through

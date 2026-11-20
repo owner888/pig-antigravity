@@ -4,6 +4,12 @@ What changed, newest first, in pig's format: `## Unreleased` while working, `## 
 at release. The version lives in the git tag only, and follows the pi-antigravity release the port
 is in step with.
 
+## Unreleased
+
+### Changed
+
+- A 429 that names no limit ("This model is unavailable right now (Resource has been exhausted …)") now says the request was stopped and not sent again, and to wait a while before sending again, as a throttle does. It used to say to switch to `gemini-3.8-flash` at once and that this was "not necessarily an account quota wall" — pi-antigravity's words, which invite sending another request on the same account right after a 429. Not pi-antigravity's wording.
+
 ## [0.14.3] - 2026-11-19
 
 ### Changed

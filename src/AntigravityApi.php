@@ -925,7 +925,10 @@ final class AntigravityApi implements StreamApi
             // such as gemini-3.1-pro fail. Do not include 429/ResourceExhausted: those tokens make
             // Pi burn its automatic retry budget and look like an account quota wall." A body
             // that is not JSON carries them itself (`"code": 429`), so it is left out.
-            return 'This model is unavailable right now (' . ($msg !== '' && !self::sessionWouldRetry($msg) ? $msg : 'resource exhausted') . '). Next: switch to gemini-3.8-flash or another Flash model. This is not necessarily an account quota wall.';
+            // Not upstream's advice on purpose: upstream says to switch to a Flash model now and that this
+            // is "not necessarily an account quota wall"; here it says to wait, as the throttle does,
+            // because a run of 429s is what came before Google suspended accounts.
+            return 'This model is unavailable right now (' . ($msg !== '' && !self::sessionWouldRetry($msg) ? $msg : 'resource exhausted') . '), so the request was stopped and not sent again: refusals like this one, repeated, can put the account at risk. Next: wait a while before sending again.';
         }
 
         if ($status === 500) {

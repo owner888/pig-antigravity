@@ -412,7 +412,7 @@ final class AntigravityApiTest extends TestCase
         // No status in it: the digits alone are what the session's retry pattern reads.
         $this->assertSame(
             'Antigravity API error (request-failed, endpoint=' . rtrim($url, '/') . ', project=proj-1, runtimeModel=gemini-3-flash, matched=static:gemini-3-flash, available=' . implode(',', \PigAntigravity\Routing::models()) . '): '
-            . 'This model is unavailable right now (Resource has been exhausted (e.g. check quota).). Next: switch to gemini-3.8-flash or another Flash model. This is not necessarily an account quota wall.',
+            . 'This model is unavailable right now (Resource has been exhausted (e.g. check quota).), so the request was stopped and not sent again: refusals like this one, repeated, can put the account at risk. Next: wait a while before sending again.',
             $message,
         );
         $this->assertFalse(\Pig\Ai\Utils\Retry::isRetryableAssistantError(new AssistantMessage([], Api::Extension, 'antigravity', 'm', new \Pig\Ai\Usage(), StopReason::Error, $message)));
