@@ -317,8 +317,12 @@ final class AntigravityApiTest extends TestCase
             // pi 1.5.2's <docs> line, with `- codemode:`, `CodeModel` and the path kept.
             "<tools>\n- codemode: Run JavaScript (CodeModel)\n</tools>\n<docs>\n- When asked about: codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n</docs>"
                 => "<tools>\n- codemode: Run JavaScript (CodeModel)\n</tools>\n<docs>\n- When asked about: codemode scripts (docs/codemode.md), non-LLM models such as classifiers and image models (docs/codemode.md)\n</docs>",
-            // pig's own opener has no "running inside", and is not rewritten.
-            'You are a coding assistant. Help users inspect files, run commands, and modify code.' => 'You are a coding assistant. Help users inspect files, run commands, and modify code.',
+            // pig's own opener (`SystemPrompt::ROLE`), which is pi's with pig's name, goes the same way.
+            "You are a coding assistant running inside pig, a coding agent harness. Help users inspect files, run commands, and modify code.\n\nAvailable tools:\n- read"
+                => "You are a coding agent helping the user with their project.\n\nAvailable tools:\n- read",
+            // Only at the start.
+            'Note: You are a coding assistant running inside pig, a coding agent harness. Help users inspect files, run commands, and modify code.'
+                => 'Note: You are a coding assistant running inside pig, a coding agent harness. Help users inspect files, run commands, and modify code.',
         ];
 
         foreach ($cases as $input => $expected) {

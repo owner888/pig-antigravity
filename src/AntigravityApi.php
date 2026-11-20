@@ -581,9 +581,9 @@ final class AntigravityApi implements StreamApi
      * fingerprints that trigger false 429 RESOURCE_EXHAUSTED responses from the Antigravity consumer
      * proxy when wire-native `systemInstruction` is sent." The whole-opener rewrite runs first.
      *
-     * pig's own prompt has none of them (`SystemPrompt::ROLE` has no "running inside"), but the
-     * prompt sent is also a custom one, an `--append-system-prompt` and every context file, and any
-     * of those can quote pi's.
+     * pig's own opener (`SystemPrompt::ROLE`) is pi's word for word with pig's name in it, so the
+     * opener rewrite neutralizes it exactly as it does pi's. The other phrases are pi's and Pi-Bolt's,
+     * which a custom prompt, an `--append-system-prompt` or a context file can quote.
      */
     public static function sanitizeSystemPrompt(string $text): string
     {
