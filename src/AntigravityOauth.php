@@ -11,6 +11,7 @@ use Pig\Ai\Utils\Oauth\OauthCredentials;
 use Pig\Ai\Utils\Oauth\OauthError;
 use Pig\Ai\Utils\Oauth\Pkce;
 use Pig\Ai\Http\HttpClient;
+use Pig\Ai\Http\HttpTransport;
 use Pig\Ai\Http\Request;
 use Pig\Ai\Timestamp;
 use Pig\Async\AbortSignal;
@@ -97,7 +98,7 @@ final class AntigravityOauth implements OauthFlow
     public function __construct(
         private readonly string $clientId,
         private readonly string $clientSecret,
-        private readonly HttpClient $http = new HttpClient(),
+        private readonly HttpTransport $http = new DailyLimitedTransport(new HttpClient()),
         private readonly ?CallbackServer $server = null,
         private readonly ?string $origin = null,
     ) {
@@ -359,8 +360,8 @@ final class AntigravityOauth implements OauthFlow
      * this used to fall back to one constant project shared by everybody it happened to.
      * **Nothing is provisioned and nothing is waited for.**
      *
-     * Every failure here is swallowed on purpose — a 404, a 403, a connection that never
-     * opened — except a 429, which ends the sign-in (the developer's choice, see `RateLimited`).
+     * Every failure here is swallowed on purpose — a 404, a 403, a 429, a connection that never
+     * opened — as upstream's are: the endpoint is passed over for the next one.
      *
      * @param Closure(string): void|null $onProgress
      */
@@ -421,8 +422,8 @@ final class AntigravityOauth implements OauthFlow
         try {
             return $this->json('POST', $this->endpoint($endpoint) . $path, $body, Discovery::headers($accessToken));
         } catch (Throwable $error) {
-            // The developer's choice: a 429 is not passed over for the next endpoint.
-            if ($error instanceof OauthError && $error->getCode() === 429) {
+            // A day over its limit of 429s is the turn's answer, never a host to pass over.
+            if ($error instanceof DailyLimitReached) {
                 throw $error;
             }
 
@@ -506,7 +507,12 @@ final class AntigravityOauth implements OauthFlow
         try {
             // Upstream's `getUserEmail()` sends the token and nothing else.
             $data = $this->json('GET', $this->endpoint(self::USERINFO_URL), null, ['Authorization' => "Bearer {$accessToken}"]);
-        } catch (Throwable) {
+        } catch (Throwable $error) {
+            // A day over its limit of 429s is the turn's answer, never a host to pass over.
+            if ($error instanceof DailyLimitReached) {
+                throw $error;
+            }
+
             return null;
         }
 
@@ -545,12 +551,6 @@ final class AntigravityOauth implements OauthFlow
     {
         $response = $this->http->send($request);
         $text = $response->body->all();
-
-        // Worded without the status or Google's own text: pig's session sends a turn again when
-        // its error reads like a rate limit, and a renewal fails inside a turn.
-        if ($response->status === 429) {
-            throw new OauthError("Google is throttling this account, so the request to {$url} was stopped and nothing more was asked. Wait a while before trying again.", 429);
-        }
 
         if (!$response->isSuccessful()) {
             throw new OauthError("Google answered {$response->status} to {$url}: {$text}");

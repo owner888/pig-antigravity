@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PigAntigravity\WebFetch;
 
 use Pig\Ai\Http\HttpClient;
+use Pig\Ai\Http\HttpTransport;
 use Pig\Async\AbortSignal;
 use PigAntigravity\Redaction;
 use RuntimeException;
@@ -26,7 +27,7 @@ final class ReadUrlContent
      * @return array{0: string, 1: array<string, mixed>} the text, and the details
      * @throws WebFetchError|RuntimeException
      */
-    public static function run(string $apiKey, string $url, ?AbortSignal $signal = null, ?HttpClient $http = null, ?array $endpoints = null): array
+    public static function run(string $apiKey, string $url, ?AbortSignal $signal = null, ?HttpTransport $http = null, ?array $endpoints = null): array
     {
         $maxChars = WebFetch::resolveMaxChars();
         $result = WebFetch::execute($apiKey, $url, signal: $signal, http: $http, endpoints: $endpoints);

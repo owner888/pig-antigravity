@@ -137,4 +137,49 @@ final class AntigravityRoutingTest extends TestCase
         // Rather than guessing a figure for a model whose family this has never seen.
         $this->assertSame(0, Routing::thinkingBudget('something-else-entirely', 'high'));
     }
+
+    public function testSiblingTiersAreTheSameModelsOtherRoutedTiersHighestFirst(): void
+    {
+        // pi-antigravity 0.13's `advertisedSiblingRuntimes()`.
+        $this->assertSame(['gemini-3.8-flash-high', 'gemini-3.8-flash-medium'], Routing::siblings('gemini-3.8-flash-low'));
+        $this->assertSame(['gemini-3.8-flash-medium', 'gemini-3.8-flash-low'], Routing::siblings('gemini-3.8-flash-high'));
+        // `-extra-low` is its own tier, not `-low` of a model called `…-extra`.
+        $this->assertSame(['gemini-3.5-flash-low'], Routing::siblings('gemini-3.5-flash-extra-low'));
+        // No tier in the name, no siblings; and a tier nothing routes to is not offered.
+        $this->assertSame([], Routing::siblings('gemini-3-flash'));
+        $this->assertSame([], Routing::siblings('gemini-2.5-flash-thinking'));
+        $this->assertSame([], Routing::siblings('gpt-oss-120b-medium'));
+    }
+
+    /** pi-antigravity 0.14: `-xhigh` is a tier, tried after `-high` and `-medium`. */
+    public function testAnXhighTierStepsDownToHighThenMediumAndIsTriedAfterThem(): void
+    {
+        $levels = ['low' => 'gemini-4-hydrogen-low', 'medium' => 'gemini-4-hydrogen-medium', 'high' => 'gemini-4-hydrogen-high', 'xhigh' => 'gemini-4-hydrogen-xhigh'];
+        Routing::useTables(
+            ['gemini-4-hydrogen' => ['default' => 'gemini-4-hydrogen-low', 'off' => 'gemini-4-hydrogen-low', 'levels' => $levels]],
+            array_combine(array_values($levels), ['MODEL_H_LOW', 'MODEL_H_MEDIUM', 'MODEL_H_HIGH', 'MODEL_H_XHIGH']),
+        );
+
+        try {
+            $this->assertSame(['gemini-4-hydrogen-high', 'gemini-4-hydrogen-medium', 'gemini-4-hydrogen-low'], Routing::siblings('gemini-4-hydrogen-xhigh'));
+            $this->assertSame(['gemini-4-hydrogen-high', 'gemini-4-hydrogen-xhigh', 'gemini-4-hydrogen-low'], Routing::siblings('gemini-4-hydrogen-medium'));
+        } finally {
+            Routing::forgetTables();
+        }
+    }
+
+    public function testSiblingTiersComeFromTheCatalogInUse(): void
+    {
+        Routing::useTables(
+            ['gemini-4-argon' => ['default' => 'gemini-4-argon-low', 'off' => 'gemini-4-argon-low', 'levels' => ['medium' => 'gemini-4-argon-medium', 'high' => 'gemini-4-argon-high']]],
+            ['gemini-4-argon-low' => 'MODEL_TEST_LOW', 'gemini-4-argon-medium' => 'MODEL_TEST_MEDIUM', 'gemini-4-argon-high' => 'MODEL_TEST_HIGH'],
+        );
+
+        try {
+            $this->assertSame(['gemini-4-argon-high', 'gemini-4-argon-low'], Routing::siblings('gemini-4-argon-medium'));
+            $this->assertSame([], Routing::siblings('gemini-3.8-flash-low'), 'the catalog in use no longer routes to it');
+        } finally {
+            Routing::forgetTables();
+        }
+    }
 }

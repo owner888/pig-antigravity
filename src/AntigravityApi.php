@@ -16,6 +16,7 @@ use Pig\Ai\StreamOptions;
 use Pig\Ai\DoneEvent;
 use Pig\Ai\ErrorEvent;
 use Pig\Ai\Http\HttpClient;
+use Pig\Ai\Http\HttpTransport;
 use Pig\Ai\Http\Request;
 use Pig\Ai\Http\Response;
 use Pig\Ai\Http\SseParser;
@@ -25,12 +26,13 @@ use Pig\Ai\StartEvent;
 use Pig\Ai\StopReason;
 use Pig\Ai\TextContent;
 use Pig\Ai\Timestamp;
-use Pig\Ai\TranscriptContext;
 use Pig\Ai\Usage;
+use Pig\Ai\TranscriptContext;
 use Pig\Ai\Utils\Retry;
 use Pig\Ai\Utils\Transcript;
 use Pig\Ai\Utils\Utf8;
 use Pig\Ai\Utils\AssistantMessageEventStream;
+use Closure;
 use Pig\Async\AbortSignal;
 use Pig\Async\Async;
 use Throwable;
@@ -68,16 +70,16 @@ final class AntigravityApi implements StreamApi
 
     /**
      * The statuses after which the next endpoint is tried — pi-antigravity's `endpointCandidates()`
-     * loop: `if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break` — without
-     * its 429, which ends the turn here (see `send()`).
+     * loop: `if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break` — except a
+     * 429 that is a quota wall, which every endpoint would answer the same way.
      */
-    private const array FALL_BACK_ON = [403, 404, 500, 502, 503, 504];
+    private const array FALL_BACK_ON = [403, 404, 429, 500, 502, 503, 504];
 
     /**
      * pi-antigravity's `turnRequestNonces`: how many requests have gone out for each turn, by
      * `<session>:<turns answered so far>`. 0 is the first request ever sent for that turn; anything
-     * above is one sent again — the session's retry, the empty-response loop, the other host.
-     * Process-wide, as upstream's module-level map is, and capped the same way.
+     * above is one sent again — the session's retry, the empty-response loop, the other host, the
+     * next account. Process-wide, as upstream's module-level map is, and capped the same way.
      *
      * @var array<string, int>
      */
@@ -91,9 +93,16 @@ final class AntigravityApi implements StreamApi
      *        Google's host and also have the request arrive at a canned server, so under a
      *        hardcoded pair the one branch that matters is the one no test can see.
      */
+    /**
+     * @param (Closure(list<string> $triedAccessTokens): ?string)|null $failover pi-antigravity's
+     *        `failoverToNextAccount()`: the next stored account whose access token has not been tried
+     *        yet, made the active one, as an api key (`{"token", "projectId"}`) — or null when there
+     *        is none. Asked when a request hits a quota wall.
+     */
     public function __construct(
-        private readonly HttpClient $http = new HttpClient(),
+        private readonly HttpTransport $http = new DailyLimitedTransport(new HttpClient()),
         private readonly ?string $fallback = null,
+        private readonly ?Closure $failover = null,
     ) {
     }
 
@@ -155,25 +164,62 @@ final class AntigravityApi implements StreamApi
             // tool call is asked for again, after 500 ms and then 1 s, before the turn fails with
             // "Antigravity API returned an empty response". Nothing goes out on the stream until
             // something has arrived (`ensureStarted()`), so an empty attempt leaves no trace.
-            for ($emptyAttempt = 0; $emptyAttempt <= 2; $emptyAttempt++) {
+            $emptyAttempt = 0;
+
+            while (true) {
                 if ($signal?->aborted() ?? false) {
                     throw new ProviderError('Request was aborted');
                 }
 
-                if ($emptyAttempt > 0) {
-                    self::sleep(0.5 * 2 ** ($emptyAttempt - 1), $signal);
-                }
-
-                $response = $this->send($model, $context, $options, $signal);
+                // The remembered capacity route is tried "if capacityAttempt === 0 && emptyAttempt === 0".
+                $sent = $this->send($model, $context, $options, $signal, $emptyAttempt === 0);
 
                 // "output.content = []; output.usage = {…}; output.stopReason = "stop"": each attempt
                 // starts from nothing.
                 $builder = new AssistantMessageBuilder($model);
-                $received = $this->read($response, $builder, $stream);
+
+                try {
+                    $received = $this->read($sent['response'], $builder, $stream);
+                } catch (Throwable $error) {
+                    // A remembered route whose stream failed before anything arrived is forgotten
+                    // and the turn walks the whole chain again.
+                    if ($sent['probed']) {
+                        unset(self::$capacityRoutes[$sent['routeKey']]);
+
+                        if (!($signal?->aborted() ?? false) && $builder->snapshot()->content === []) {
+                            continue;
+                        }
+                    }
+
+                    throw $error;
+                }
 
                 if ($received) {
+                    if ($builder->stopReason() !== StopReason::Error && $builder->stopReason() !== StopReason::Aborted) {
+                        // "Remember the live fallback route only after the SSE stream actually
+                        // succeeded (not merely on HTTP 200 headers)."
+                        if ($sent['cacheable'] && ($sent['runtime'] !== $sent['initial'] || $sent['endpoint'] !== $sent['firstEndpoint'])) {
+                            self::rememberCapacityRoute($sent['routeKey'], $sent['runtime'], $sent['endpoint']);
+                        }
+                    } elseif ($sent['probed']) {
+                        unset(self::$capacityRoutes[$sent['routeKey']]);
+                    }
+
                     break;
                 }
+
+                if ($sent['probed']) {
+                    unset(self::$capacityRoutes[$sent['routeKey']]);
+                }
+
+                if ($emptyAttempt < 2) {
+                    $emptyAttempt++;
+                    self::sleep(0.5 * 2 ** ($emptyAttempt - 1), $signal);
+
+                    continue;
+                }
+
+                break;
             }
 
             if (!$received) {
@@ -307,22 +353,30 @@ final class AntigravityApi implements StreamApi
     }
 
     /**
-     * The request, through the runtime models and the endpoints — pi-antigravity's request loop,
-     * except at a 429.
+     * The request, through the runtime models, the endpoints and the stored accounts —
+     * pi-antigravity's request loop.
      *
      * The runtime model `Routing` resolves, then `Routing::fallback()`'s (pi-antigravity's
      * `getFallbackRuntimeModel()`) when that one is answered 404. For each, every endpoint in turn
-     * while the answer is one of `FALL_BACK_ON`, stopping at a success or at any other status. An
-     * endpoint that fails before it answers (cannot connect, no response head in time) is passed
-     * over for the next one too, and only when none answered is that failure the turn's. A refusal
-     * is `Antigravity API error (<status>, <diagnostics>): <friendlyAntigravityError()>`, a quota
-     * wall its own sentence ("Quota reached. …").
+     * while the answer is one of `FALL_BACK_ON`, stopping at a success, at any other status, or at
+     * a quota wall (`isQuotaWall()`). A generic resource exhaustion — a 429 that names no limit —
+     * walks the endpoints too, then the same-generation tiers (`Routing::siblings()`), four
+     * runtime models at most, then the next candidate: "capacity pressure when another endpoint
+     * or same-generation tier might still be live." An endpoint that fails before it answers
+     * (cannot connect, no response head in time) is passed over for the next one too, and only
+     * when none answered is that failure the turn's.
      *
-     * **A 429 of any kind ends the turn with that one request** — the developer's choice, where
-     * upstream asks the other endpoint, the same-generation tiers and the next stored account, and
-     * words a throttle so that the session sends it again. Google suspends accounts, and a burst of
-     * 429s comes first; whether to ask again is the person's to decide, so nothing here does and
-     * no 429 sentence is one the session retries.
+     * Then, as pi-antigravity 0.15: a quota wall asks `$failover` for an account not yet tried and
+     * starts over with it; with none left, the turn fails with the wall's own sentence ("Quota
+     * reached. …"). A capacity refusal (`isCapacityFailure()`: that generic 429, or a 503 "No
+     * capacity available") "says nothing about the model yet: the same request succeeds once the
+     * shared pool drains" — so it is sent again after `capacityBackoffMs()` (3, 8, 15, 25 s,
+     * jittered) while `capacityAttemptLimit()` allows. Any other refusal is `Antigravity API error
+     * (<status>, <diagnostics>): <friendlyAntigravityError()>`.
+     *
+     * The route a capacity walk ended on is remembered (`rememberCapacityRoute()`, by the caller,
+     * once the stream succeeded); with $probe, the first pass sends to it once on its own, and
+     * forgets it the moment it fails.
      *
      * Every request after the first for a turn goes out under a fresh session and trajectory
      * (`retrySessionSeed()`): "a crashed stream can keep generating server-side while the backend
@@ -331,11 +385,14 @@ final class AntigravityApi implements StreamApi
      *
      * Not ported: pi-antigravity's dynamic model discovery (`fetchAvailableRuntimeModel()`), for a
      * model its tables do not know or a 404 on every candidate — pig's catalogue is the tables.
+     *
+     * @return array{response: Response, routeKey: string, runtime: string, endpoint: string, initial: string, firstEndpoint: string, probed: bool, cacheable: bool}
      */
-    private function send(Model $model, TranscriptContext $context, ?GoogleOptions $options, ?AbortSignal $signal): Response
+    private function send(Model $model, TranscriptContext $context, ?GoogleOptions $options, ?AbortSignal $signal, bool $probe = true): array
     {
         $apiKey = $options?->apiKey;
         [$token, $project] = self::credentials($apiKey);
+        $tried = [$token];
 
         // A `models.json` pointing this provider somewhere of its own — a proxy, a local gateway
         // — is believed rather than silently second-guessed with Google's other host.
@@ -352,16 +409,13 @@ final class AntigravityApi implements StreamApi
             $hosts = [$enterprise->host];
         }
 
+        // "allowCapacityCache = !enterpriseTarget && !RUNTIME_MODEL && !BASE_URL".
+        $cacheable = $enterprise === null && Discovery::env('BASE_URL') === null;
+
         // Both, so that the two cannot contradict each other: `thinkingEnabled: false` with a level
         // set means off, which is the reading every other provider here gives it.
         $level = ($options?->thinkingEnabled ?? false) ? $options?->thinkingLevel : null;
         $initial = Routing::resolve($model->id, $level)[0];
-        $candidates = [$initial];
-        $fallback = Routing::fallback($initial, $level);
-
-        if ($fallback !== null && $fallback !== $initial) {
-            $candidates[] = $fallback;
-        }
 
         // "Turn identity mirrors buildRequest's requestIndex (count of successful assistant
         // messages): it stays constant across retries of one turn and changes the moment any turn
@@ -371,98 +425,208 @@ final class AntigravityApi implements StreamApi
         $sessionId = $options?->sessionId;
         $turnKey = ($sessionId !== null && trim($sessionId) !== '' ? $sessionId : 'anonymous:' . self::seed($context)) . ':' . self::turnsAnswered($context);
 
-        $last = null;
-        $lastText = '';
-        $lastHost = $primary;
-        $runtime = $initial;
+        $attempt = function (string $runtime, string $host) use ($model, $context, $options, $enterprise, &$project, &$token, $sessionId, $turnKey, $signal): Response {
+            $nonce = self::nextRequestNonce($turnKey);
+            $payload = $this->body($model, $context, $options, $enterprise?->projectId ?? $project, $runtime, $nonce === 0 ? null : self::retrySessionSeed($sessionId, $nonce));
 
-        foreach ($candidates as $index => $runtime) {
+            if ($enterprise !== null) {
+                $payload = $enterprise->generateBody($payload);
+            }
+
+            // pi-antigravity 0.13 (#126): `onPayload` sees the request as it is about to go, and
+            // what it answers goes instead.
+            $rewritten = $options?->onPayload !== null ? ($options->onPayload)($payload, $model) : null;
+            $body = $this->encode(is_array($rewritten) ? $rewritten : $payload);
+            $url = $enterprise?->streamUrl() ?? rtrim($host, '/') . '/v1internal:streamGenerateContent?alt=sse';
+
+            return $this->http->send($this->request($url, $token, $model, $body, $enterprise !== null), $signal);
+        };
+
+        $capacityAttempts = self::capacityAttemptLimit();
+        $capacityAttempt = 0;
+        $result = fn (Response $response, string $routeKey, string $runtime, string $host, bool $probed): array => [
+            'response' => $response, 'routeKey' => $routeKey, 'runtime' => $runtime, 'endpoint' => $host,
+            'initial' => $initial, 'firstEndpoint' => $hosts[0], 'probed' => $probed, 'cacheable' => $cacheable,
+        ];
+
+        while (true) {
+            if ($signal?->aborted() ?? false) {
+                throw new ProviderError('Request was aborted');
+            }
+
+            // `resolveCapacityCandidates()`, "at the start of every outer pass so sibling tiers
+            // discovered in pass 1 are retried cleanly on pass 2+".
+            $routeKey = self::accountTag($token) . "\0{$project}\0{$initial}";
+            $cached = $cacheable ? self::rememberedCapacityRoute($routeKey) : null;
+            $candidates = [$initial];
+            $fallback = Routing::fallback($initial, $level);
+
+            if ($fallback !== null && $fallback !== $initial) {
+                $candidates[] = $fallback;
+            }
+
             $last = null;
-            $lastEndpointError = null;
+            $lastText = '';
+            $lastHost = $primary;
+            $runtime = $initial;
 
-            foreach ($hosts as $host) {
-                $lastHost = $host;
-                $nonce = self::nextRequestNonce($turnKey);
-                $payload = $this->body($model, $context, $options, $enterprise?->projectId ?? $project, $runtime, $nonce === 0 ? null : self::retrySessionSeed($sessionId, $nonce));
-
-                if ($enterprise !== null) {
-                    $payload = $enterprise->generateBody($payload);
-                }
-
-                // pi-antigravity 0.13 (#126): `onPayload` sees the request as it is about to
-                // go, and what it answers goes instead.
-                $rewritten = $options?->onPayload !== null ? ($options->onPayload)($payload, $model) : null;
-                $body = $this->encode(is_array($rewritten) ? $rewritten : $payload);
-                $url = $enterprise?->streamUrl() ?? rtrim($host, '/') . '/v1internal:streamGenerateContent?alt=sse';
+            // "Single-probe cached capacity route outside normal candidate de-duplication: if it
+            // fails (transport, non-OK, or body read failure), evict it immediately and fall
+            // through to the full normal chain."
+            if ($cached !== null && $probe && $capacityAttempt === 0) {
+                $runtime = $cached['runtime'];
+                $lastHost = $cached['endpoint'];
 
                 try {
-                    $last = $this->http->send($this->request($url, $token, $model, $body, $enterprise !== null), $signal);
+                    $probeResponse = $attempt($runtime, $cached['endpoint']);
+
+                    if ($probeResponse->isSuccessful()) {
+                        return $result($probeResponse, $routeKey, $runtime, $cached['endpoint'], true);
+                    }
+
+                    unset(self::$capacityRoutes[$routeKey]);
+                    $lastText = $probeResponse->body->all();
                 } catch (Throwable $error) {
-                    // "Caller cancellation is not an endpoint failure — propagate it. A transport
-                    // failure or our own header deadline abort means this endpoint may be wedged;
-                    // ENDPOINT_FALLBACKS exist for that, so fall through instead of dying
-                    // without trying them."
+                    // A day over its limit of 429s is the turn's answer, never a host to pass over.
+                    if ($error instanceof DailyLimitReached) {
+                        throw $error;
+                    }
+
                     if ($signal?->aborted() ?? false) {
                         throw $error;
                     }
 
-                    $lastEndpointError = $error;
+                    unset(self::$capacityRoutes[$routeKey]);
+                }
+            }
+
+            // Not `foreach`: a sibling tier is put into the list while it is being walked.
+            for ($index = 0; $index < count($candidates); $index++) {
+                $runtime = $candidates[$index];
+                $last = null;
+                $lastEndpointError = null;
+
+                foreach ($hosts as $host) {
+                    $lastHost = $host;
+
+                    try {
+                        $last = $attempt($runtime, $host);
+                    } catch (Throwable $error) {
+                        // A day over its limit of 429s is the turn's answer, never a host to pass over.
+                        if ($error instanceof DailyLimitReached) {
+                            throw $error;
+                        }
+
+                        // "Caller cancellation is not an endpoint failure — propagate it. A transport
+                        // failure or our own header deadline abort means this endpoint may be wedged;
+                        // ENDPOINT_FALLBACKS exist for that, so fall through instead of dying
+                        // without trying them."
+                        if ($signal?->aborted() ?? false) {
+                            throw $error;
+                        }
+
+                        $lastEndpointError = $error;
+
+                        continue;
+                    }
+
+                    if ($last->isSuccessful()) {
+                        return $result($last, $routeKey, $runtime, $host, false);
+                    }
+
+                    $lastText = $last->body->all();
+
+                    if ($last->status === 429 && self::isQuotaWall($lastText)) {
+                        break;
+                    }
+
+                    // "Generic RESOURCE_EXHAUSTED is capacity pressure when another endpoint or
+                    // same-generation tier might still be live."
+                    if ($last->status === 429 && self::isGenericResourceExhausted($lastText)) {
+                        continue;
+                    }
+
+                    if ($last->status === 429 && !self::isRetryableRateLimit($lastText)) {
+                        break;
+                    }
+
+                    if (!in_array($last->status, self::FALL_BACK_ON, true)) {
+                        break;
+                    }
+                }
+
+                // "Every endpoint threw before sending headers: rethrow the original transport error
+                // so its message (which pi classifies for auto-retry) survives instead of being
+                // masked by the generic failure path below."
+                if ($last === null && $lastEndpointError !== null) {
+                    throw $lastEndpointError;
+                }
+
+                // "if (response?.status === 404) { if (candIdx + 1 < runtimeCandidates.length) continue; }"
+                if ($last?->status === 404 && $index + 1 < count($candidates)) {
+                    continue;
+                }
+
+                if ($last?->status === 429 && self::isGenericResourceExhausted($lastText)) {
+                    $sibling = array_values(array_diff(Routing::siblings($runtime), $candidates))[0] ?? null;
+
+                    if ($sibling !== null && count($candidates) < 4) {
+                        // "Same-generation tiers before a cross-generation compatibility fallback."
+                        array_splice($candidates, $index + 1, 0, [$sibling]);
+
+                        continue;
+                    }
+
+                    if ($index + 1 < count($candidates)) {
+                        continue;
+                    }
+                }
+
+                break;
+            }
+
+            // Unreachable with a non-empty host list, and `$hosts` always has one.
+            if ($last === null) {
+                throw new ProviderError('No endpoint to try.');
+            }
+
+            $friendly = self::friendlyAntigravityError($last->status, $lastText);
+
+            if ($last->status === 429 && preg_match('/Quota reached\./i', $friendly) === 1) {
+                $next = $this->failover !== null ? ($this->failover)($tried) : null;
+
+                if ($next !== null) {
+                    [$token, $project] = self::credentials($next);
+                    $tried[] = $token;
+                    $capacityAttempt = 0;
 
                     continue;
                 }
 
-                if ($last->isSuccessful()) {
-                    return $last;
-                }
-
-                $lastText = $last->body->all();
-
-                // The developer's choice, not upstream's: no other endpoint, tier or account is
-                // asked after a 429.
-                if ($last->status === 429) {
-                    break 2;
-                }
-
-                if (!in_array($last->status, self::FALL_BACK_ON, true)) {
-                    break;
-                }
+                throw new ProviderError($friendly);
             }
 
-            // "Every endpoint threw before sending headers: rethrow the original transport error
-            // so its message (which pi classifies for auto-retry) survives instead of being
-            // masked by the generic failure path below."
-            if ($last === null && $lastEndpointError !== null) {
-                throw $lastEndpointError;
-            }
+            // "A capacity refusal says nothing about the model yet: the same request succeeds once
+            // the shared pool drains. Walk the backoff ladder while attempts remain instead of
+            // surfacing a terminal "unavailable"."
+            if (self::isCapacityFailure($last->status, $lastText) && $capacityAttempt < $capacityAttempts - 1) {
+                $capacityAttempt++;
+                self::sleep(self::capacityBackoffMs($capacityAttempt) / 1000, $signal);
 
-            // "if (response?.status === 404) { if (candIdx + 1 < runtimeCandidates.length) continue; }"
-            if ($last?->status === 404 && $index + 1 < count($candidates)) {
                 continue;
             }
 
-            break;
+            throw new ProviderError(
+                'Antigravity API error (' . self::publicErrorStatus($last->status, $friendly) . ', ' . self::formatRequestDiagnostics($lastHost, $project, $runtime) . "): {$friendly}",
+            );
         }
-
-        // Unreachable with a non-empty host list, and `$hosts` always has one.
-        if ($last === null) {
-            throw new ProviderError('No endpoint to try.');
-        }
-
-        $friendly = self::friendlyAntigravityError($last->status, $lastText);
-
-        if ($last->status === 429 && preg_match('/Quota reached\./i', $friendly) === 1) {
-            throw new ProviderError($friendly);
-        }
-
-        throw new ProviderError(
-            'Antigravity API error (' . self::publicErrorStatus($last->status) . ', ' . self::formatRequestDiagnostics($lastHost, $project, $runtime) . "): {$friendly}",
-        );
     }
 
     /**
-     * pi-antigravity's `publicErrorStatus()`, for the 429 it was written for: "Pi treats the digits
-     * 429 as a retryable provider error" (`Retry`'s pattern is upstream's, so pig does too), and
-     * no 429 is retried here.
+     * pi-antigravity's `publicErrorStatus()`, for the 429 it was written for: "Keep the numeric
+     * status out of non-retryable errors. Pi treats the digits 429 as a retryable provider error
+     * even when the friendly text says the model is unavailable." (`Retry`'s pattern is upstream's,
+     * so pig does too.)
      *
      * **Narrower than upstream on purpose.** Upstream hides the status of every refusal whose
      * sentence does not say "retrying automatically", which takes the digits off a 502 and a 503
@@ -470,9 +634,9 @@ final class AntigravityApi implements StreamApi
      * match nothing in the retry pattern, so those would stop being retried. Nothing upstream says
      * that was meant; here the other statuses keep their number.
      */
-    private static function publicErrorStatus(int $status): string
+    private static function publicErrorStatus(int $status, string $friendly): string
     {
-        return $status === 429 ? 'request-failed' : (string) $status;
+        return $status === 429 && preg_match('/retrying automatically/i', $friendly) !== 1 ? 'request-failed' : (string) $status;
     }
 
     /** `nextRequestNonce()`: how many requests went out for this turn before this one. */
@@ -496,6 +660,147 @@ final class AntigravityApi implements StreamApi
     }
 
     /**
+     * pi-antigravity's `CAPACITY_BACKOFF_DEFAULT_MS`: "Backoff ladder for transient capacity
+     * refusals. Consumer endpoints answer generic `429 RESOURCE_EXHAUSTED` (no reset hint) and
+     * `503 No capacity available` while the model pool still reports quota remaining, and then
+     * serve the same request once the queue drains."
+     */
+    private const array CAPACITY_BACKOFF_DEFAULT_MS = [3_000, 8_000, 15_000, 25_000];
+
+    /** `CAPACITY_ROUTE_TTL_MS`: a remembered route is believed for ten minutes. */
+    private const int CAPACITY_ROUTE_TTL_MS = 10 * 60_000;
+
+    /**
+     * `preferredCapacityRoutes`: "cross-turn memory of the (runtimeModel, endpoint) that actually
+     * answered after a generic-429 capacity walk, keyed by account tag, projectId, and the initial
+     * runtime model. Without it every turn of a session replays dead-tier HTTP hops and burns a
+     * fresh retry nonce, mutating the upstream sessionId and wiping the prompt cache."
+     *
+     * @var array<string, array{runtime: string, endpoint: string, expiresAt: int}>
+     */
+    private static array $capacityRoutes = [];
+
+    /** @var array<string, int> access token => `accountTag()`'s number */
+    private static array $accountTags = [];
+
+    private static int $nextAccountTag = 1;
+
+    /** `capacityBackoffSchedule()`: `CAPACITY_BACKOFF_MS`, comma-separated, else the default. @return list<int> */
+    private static function capacityBackoffSchedule(): array
+    {
+        $raw = trim((string) Discovery::env('CAPACITY_BACKOFF_MS'));
+
+        if ($raw === '') {
+            return self::CAPACITY_BACKOFF_DEFAULT_MS;
+        }
+
+        $parsed = [];
+
+        foreach (explode(',', $raw) as $part) {
+            $part = trim($part);
+
+            if (is_numeric($part) && (float) $part >= 0 && (float) $part <= 120_000) {
+                $parsed[] = (int) $part;
+            }
+        }
+
+        return $parsed !== [] ? $parsed : self::CAPACITY_BACKOFF_DEFAULT_MS;
+    }
+
+    /** `capacityAttemptLimit()`: "the first request plus one per backoff step", or `CAPACITY_ATTEMPTS` (1–10). */
+    public static function capacityAttemptLimit(): int
+    {
+        $raw = trim((string) Discovery::env('CAPACITY_ATTEMPTS'));
+
+        if (is_numeric($raw) && (float) $raw >= 1 && (float) $raw <= 10) {
+            return (int) floor((float) $raw);
+        }
+
+        return count(self::capacityBackoffSchedule()) + 1;
+    }
+
+    /** `capacityBackoffMs()`: "Jitter keeps sessions sharing one quota pool from retrying in lockstep." */
+    private static function capacityBackoffMs(int $attempt): int
+    {
+        $schedule = self::capacityBackoffSchedule();
+        $base = $schedule[min($attempt - 1, count($schedule) - 1)] ?? 0;
+
+        return (int) round($base * (0.9 + mt_rand() / mt_getrandmax() * 0.2));
+    }
+
+    /** `isCapacityFailure()`: "Capacity refusals that describe load, not a retired model or a quota wall." */
+    public static function isCapacityFailure(?int $status, string $text): bool
+    {
+        return match ($status) {
+            429 => self::isGenericResourceExhausted($text),
+            503 => preg_match('/no capacity available/i', $text) === 1,
+            default => false,
+        };
+    }
+
+    /** `rememberCapacityRoute()`, at most 64, the oldest going first. */
+    public static function rememberCapacityRoute(string $routeKey, string $runtime, string $endpoint, ?int $now = null): void
+    {
+        unset(self::$capacityRoutes[$routeKey]);
+        self::$capacityRoutes[$routeKey] = ['runtime' => $runtime, 'endpoint' => $endpoint, 'expiresAt' => ($now ?? self::nowMs()) + self::CAPACITY_ROUTE_TTL_MS];
+
+        while (count(self::$capacityRoutes) > 64) {
+            unset(self::$capacityRoutes[array_key_first(self::$capacityRoutes)]);
+        }
+    }
+
+    /** `rememberedCapacityRoute()`: the route for $routeKey while it has not expired. @return array{runtime: string, endpoint: string}|null */
+    public static function rememberedCapacityRoute(string $routeKey, ?int $now = null): ?array
+    {
+        $entry = self::$capacityRoutes[$routeKey] ?? null;
+
+        if ($entry === null) {
+            return null;
+        }
+
+        if ($entry['expiresAt'] <= ($now ?? self::nowMs())) {
+            unset(self::$capacityRoutes[$routeKey]);
+
+            return null;
+        }
+
+        return ['runtime' => $entry['runtime'], 'endpoint' => $entry['endpoint']];
+    }
+
+    /** `clearCapacityRouteCache()`. For tests. */
+    public static function forgetCapacityRoutes(): void
+    {
+        self::$capacityRoutes = [];
+        self::$accountTags = [];
+        self::$nextAccountTag = 1;
+    }
+
+    /**
+     * `accountTag()`: "an opaque in-process identifier per distinct access token instead of
+     * embedding or hashing it", at most 64.
+     */
+    private static function accountTag(string $token): string
+    {
+        if (isset(self::$accountTags[$token])) {
+            return 'acct-' . self::$accountTags[$token];
+        }
+
+        $id = self::$nextAccountTag++;
+        self::$accountTags[$token] = $id;
+
+        while (count(self::$accountTags) > 64) {
+            unset(self::$accountTags[array_key_first(self::$accountTags)]);
+        }
+
+        return "acct-{$id}";
+    }
+
+    private static function nowMs(): int
+    {
+        return (int) floor(microtime(true) * 1000);
+    }
+
+    /**
      * `retrySessionSeed()`: what a request sent again is identified by — the session's id with the
      * count on it, or something random when there is no session id to hang it on.
      */
@@ -515,10 +820,25 @@ final class AntigravityApi implements StreamApi
         ));
     }
 
-    /** pi-antigravity's `isRetryableRateLimit()`, "short throttles" — which nothing here retries. */
-    private static function isThrottle(string $text): bool
+    /** "Short throttles. Pi retries these; persistent model unavailability must not match." */
+    private static function isRetryableRateLimit(string $text): bool
     {
         return preg_match('/rate.?limit|too many requests/i', $text) === 1;
+    }
+
+    /**
+     * pi-antigravity's `isGenericResourceExhausted()`: "Generic capacity 429 with no reset hint.
+     * Dead tiers and live-but-throttled tiers share this body. Callers decide whether to walk
+     * endpoints and sibling tiers; the public error stays non-retryable for Pi once those attempts
+     * are exhausted."
+     */
+    private static function isGenericResourceExhausted(string $text): bool
+    {
+        if (self::isQuotaWall($text) || self::isRetryableRateLimit($text)) {
+            return false;
+        }
+
+        return preg_match('/resource has been exhausted|RESOURCE_EXHAUSTED/i', $text) === 1;
     }
 
     /** Whether pig's session would send a turn that failed with $message again by itself. */
@@ -538,6 +858,19 @@ final class AntigravityApi implements StreamApi
         $available = implode(',', Routing::models());
 
         return "endpoint={$endpoint}, project={$project}, runtimeModel={$runtime}, matched=static:{$runtime}, available=" . ($available !== '' ? $available : 'static-catalog');
+    }
+
+    /**
+     * pi-antigravity's quota-wall test on a 429's text: "Individual quota reached", a "Resets in …"
+     * hint, an AI credits balance that has run out, or quota wording that is not about rate limiting. Public for `ImageGenerator`, whose
+     * request loop fails over on the same wall.
+     */
+    public static function isQuotaWall(string $text): bool
+    {
+        return preg_match('/Individual quota reached/i', $text) === 1
+            || preg_match('/Resets? in /i', $text) === 1
+            || preg_match('/AI credits balance is too low|INSUFFICIENT_G1_CREDITS/i', $text) === 1
+            || (preg_match('/rate.?limit/i', $text) !== 1 && preg_match('/quota exceeded|exceeded your|daily limit/i', $text) === 1);
     }
 
     private function request(string $url, string $token, Model $model, string $body, bool $enterprise = false): Request
@@ -985,15 +1318,13 @@ final class AntigravityApi implements StreamApi
      * text is `jsonOrTextError()`'s (the error body's `error.message`, else the body), with secrets
      * redacted, cut at 500 characters.
      *
-     * The wording is what decides whether the session retries, and no 429 sentence is one it
-     * does: a quota wall ("Individual quota reached", a "Resets in …" hint, or quota wording that
-     * is not about rate limiting) is `Quota reached. …`, with the time to wait; a throttle says
-     * so without upstream's "Rate limited … (429 ResourceExhausted) … retrying automatically",
-     * every part of which the session reads as "send it again"; and the backend's own words are
-     * quoted only when they would not be read that way either.
+     * The 429 wording is what decides whether the session retries: a quota wall ("Individual quota
+     * reached", a "Resets in …" hint, or quota wording that is not about rate limiting) is `Quota
+     * reached. …` — which matches none of the retryable patterns, so the turn fails at once with
+     * the time to wait — and any other 429 is transient throttling, `Rate limited by Antigravity
+     * (429 ResourceExhausted)…`, which the session's backoff waits out.
      *
-     * Two are worded here and not upstream: that throttle, and the 403 of an account Google has
-     * suspended.
+     * One 403 is worded here and not upstream: an account Google has suspended.
      */
     public static function friendlyAntigravityError(?int $status, string $text): string
     {
@@ -1092,18 +1423,15 @@ final class AntigravityApi implements StreamApi
                 return 'Quota reached.' . ($wait !== '' ? " Please wait {$wait}." : '') . "{$hint} Next: switch models or retry later.";
             }
 
-            if (self::isThrottle($msg)) {
-                return 'Antigravity is throttling this account, so the request was stopped and not sent again: repeating a throttled request puts the account at risk. Next: wait a while before sending again, or switch models.';
+            if (self::isRetryableRateLimit($msg)) {
+                return 'Rate limited by Antigravity (429 ResourceExhausted). Next: retrying automatically; if it persists, switch models.';
             }
 
             // "A generic RESOURCE_EXHAUSTED body, with no reset hint, is how unavailable models
             // such as gemini-3.1-pro fail. Do not include 429/ResourceExhausted: those tokens make
             // Pi burn its automatic retry budget and look like an account quota wall." A body
             // that is not JSON carries them itself (`"code": 429`), so it is left out.
-            // Not upstream's advice on purpose: upstream says to switch to a Flash model now and that this
-            // is "not necessarily an account quota wall"; here it says to wait, as the throttle does,
-            // because a run of 429s is what came before Google suspended accounts.
-            return 'This model is unavailable right now (' . ($msg !== '' && !self::sessionWouldRetry($msg) ? $msg : 'resource exhausted') . '), so the request was stopped and not sent again: refusals like this one, repeated, can put the account at risk. Next: wait a while before sending again.';
+            return 'This model is unavailable right now (' . ($msg !== '' && !self::sessionWouldRetry($msg) ? $msg : 'resource exhausted') . '). Next: switch to gemini-3.8-flash or another Flash model. This is not necessarily an account quota wall.';
         }
 
         if ($status === 500) {

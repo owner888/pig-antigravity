@@ -352,17 +352,6 @@ final class AntigravityWebFetchTest extends TestCase
 
     // ---- endpoints, deadlines, aborts ----------------------------------------------------------
 
-    public function testA429EndsTheReadAndNoLaterStageAsksGoogleAgain(): void
-    {
-        // The developer's choice: upstream goes on from a 429 at the cache to the live fetch.
-        $this->server->handle(static fn (string $path): array => self::isRewrite($path) ? [200, []] : [429, ['error' => ['message' => 'Resource has been exhausted (e.g. check quota).']]]);
-
-        $message = $this->failure('https://example.com/page');
-
-        $this->assertStringContainsString('nothing more was asked', $message);
-        $this->assertSame(1, count(array_filter($this->server->calls, static fn (array $call): bool => !self::isRewrite($call['path']))), 'the cache was asked, the live fetch was not');
-    }
-
     public function testAnEndpointThatCannotBeReachedIsPassedOverForTheNextOne(): void
     {
         $dead = stream_socket_server('tcp://127.0.0.1:0');

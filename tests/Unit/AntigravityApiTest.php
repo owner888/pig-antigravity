@@ -40,6 +40,10 @@ final class AntigravityApiTest extends TestCase
         Loop::reset();
         // Which request is a turn's first is counted per process; every test starts the count over.
         Antigravity::forgetRequestNonces();
+        Antigravity::forgetCapacityRoutes();
+        // One attempt, no backoff: the ladder has tests of its own, which set it themselves.
+        putenv('ANTIGRAVITY_CAPACITY_ATTEMPTS=1');
+        putenv('ANTIGRAVITY_CAPACITY_BACKOFF_MS');
         $this->server = new CannedServer();
     }
 
@@ -48,6 +52,8 @@ final class AntigravityApiTest extends TestCase
     {
         \Pig\Ai\Extension\ProviderRegistry::forget();
         \PigAntigravity\Routing::forgetTables();
+        putenv('ANTIGRAVITY_CAPACITY_ATTEMPTS');
+        putenv('ANTIGRAVITY_CAPACITY_BACKOFF_MS');
     }
 
     /** What signing in stores: a token and a Cloud project in one string. */
@@ -74,7 +80,8 @@ final class AntigravityApiTest extends TestCase
     {
         $this->send('gemini-3.8-flash', 'high');
 
-        $this->assertSame('gemini-3.8-flash-high', $this->server->receivedJson()['model']);
+        preg_match_all('/"model":"([^"]+)"/', $this->server->received(), $models);
+        $this->assertSame('gemini-3.8-flash-high', end($models[1]), 'the last request');
     }
 
     public function testThinkingOffStillPicksARuntimeModelAndAsksForNoBudget(): void
@@ -534,70 +541,56 @@ final class AntigravityApiTest extends TestCase
         $this->assertSame('', $second->receivedHead(), 'the second host was never asked');
     }
 
-    public function testAThrottling429EndsTheTurnAtThatOneRequestAndTheSessionDoesNotSendItAgain(): void
+    public function testATransient429IsTriedOnTheOtherHostAndThenReadsAsThrottling(): void
     {
-        // The developer's choice, not upstream's, which asks the other host and words the refusal
-        // so that the session's backoff sends it three more times.
+        // `[403, 404, 429, 500, 502, 503, 504]` move on to the next endpoint; a 429 that says it
+        // is rate limiting is throttling, worded so that the session's backoff engages.
         $first = new CannedServer();
         $url = $first->start([self::refusal(429, 'Rate limit exceeded: slow down')]);
 
         $second = new CannedServer();
-        $secondUrl = $second->start([self::refusal(200, 'unused')]);
+        $secondUrl = $second->start([self::refusal(429, 'Too many requests')]);
 
-        $message = (string) $this->drain(new Antigravity(fallback: $secondUrl), $this->model($url), 'gemini-3-flash', 'low', new Context([new UserMessage('hi')]));
+        $message = $this->drain(new Antigravity(fallback: $secondUrl), $this->model($url), 'gemini-3-flash', 'low', new Context([new UserMessage('hi')]));
 
-        $this->assertStringStartsWith('Antigravity API error (request-failed, endpoint=' . rtrim($url, '/') . ',', $message);
-        $this->assertStringEndsWith('): Antigravity is throttling this account, so the request was stopped and not sent again: repeating a throttled request puts the account at risk. Next: wait a while before sending again, or switch models.', $message);
-        $this->assertFalse(\Pig\Ai\Utils\Retry::isRetryableAssistantError(new AssistantMessage([], Api::Extension, 'antigravity', 'm', new \Pig\Ai\Usage(), StopReason::Error, $message)));
-        $this->assertSame(1, $first->connections());
-        $this->assertSame('', $second->receivedHead(), 'the second host was never asked');
+        // pi-antigravity's own shape for every refusal that is not a quota wall:
+        // `Antigravity API error (<status>, <diagnostics>): <friendly>`.
+        $this->assertStringStartsWith('Antigravity API error (429, endpoint=' . $secondUrl, (string) $message);
+        $this->assertStringEndsWith('): Rate limited by Antigravity (429 ResourceExhausted). Next: retrying automatically; if it persists, switch models.', (string) $message);
+        $this->assertTrue(\Pig\Ai\Utils\Retry::isRetryableAssistantError(new \Pig\Ai\AssistantMessage([], \Pig\Ai\Api::Extension, 'antigravity', 'm', new \Pig\Ai\Usage(), \Pig\Ai\StopReason::Error, (string) $message)), 'still throttling to the session');
+        $this->assertNotSame('', $second->receivedHead(), 'the second host was asked');
     }
 
-    /** @return iterable<string, array{0: string}> */
-    public static function bodiesTheSessionWouldReadAsARetry(): iterable
-    {
-        yield 'not JSON, carrying the status' => ['{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}'];
-        yield 'a message naming the status' => [(string) json_encode(['error' => ['message' => 'Error 429: resource has been exhausted']])];
-        yield 'a message that says overloaded' => [(string) json_encode(['error' => ['message' => 'The model is overloaded. Resource has been exhausted.']])];
-        yield 'too many requests' => [(string) json_encode(['error' => ['message' => 'Too many requests']])];
-        yield 'nothing at all' => [''];
-    }
-
-    #[\PHPUnit\Framework\Attributes\DataProvider('bodiesTheSessionWouldReadAsARetry')]
-    public function testNo429IsWordedSoThatTheSessionSendsItAgain(string $body): void
-    {
-        $url = $this->server->startSequence([
-            ["HTTP/1.1 429 Refused\r\nContent-Length: " . strlen($body) . "\r\n\r\n" . $body],
-            [self::refusal(200, 'unused')],
-        ]);
-
-        $message = (string) $this->drain(new Antigravity(fallback: rtrim($url, '/')), $this->model($url), 'gemini-3.8-flash', 'medium', new Context([new UserMessage('hi')]));
-
-        $this->assertFalse(\Pig\Ai\Utils\Retry::isRetryableAssistantError(new AssistantMessage([], Api::Extension, 'antigravity', 'm', new \Pig\Ai\Usage(), StopReason::Error, $message)), $message);
-        $this->assertSame(1, $this->server->connections());
-    }
-
-    public function testA429ThatNamesNoLimitIsAModelNotBeingServedAndNoOtherEndpointIsAsked(): void
+    public function testA429ThatNamesNoLimitIsAskedOfEveryEndpointAndThenIsAModelNotBeingServed(): void
     {
         // pi-antigravity 0.11: "A generic RESOURCE_EXHAUSTED body, with no reset hint, is how
-        // unavailable models fail." Upstream 0.13 asks the other endpoint too; here it is not.
+        // unavailable models fail." 0.13: the other endpoint may still be serving it, so it is
+        // asked too; when it says the same, the session's backoff is not spent on it, and it is not
+        // this account's quota either. `gemini-3-flash` ends in no tier, so no sibling is tried.
         $first = new CannedServer();
         $url = $first->start([self::refusal(429, 'Resource has been exhausted (e.g. check quota).')]);
 
         $second = new CannedServer();
-        $secondUrl = $second->start([self::refusal(200, 'unused')]);
+        $secondUrl = $second->start([self::refusal(429, 'Resource has been exhausted (e.g. check quota).')]);
+        $asked = 0;
+        $failover = static function () use (&$asked): ?string {
+            $asked++;
 
-        $message = (string) $this->drain(new Antigravity(fallback: $secondUrl), $this->model($url), 'gemini-3-flash', 'low', new Context([new UserMessage('hi')]));
+            return null;
+        };
+
+        $message = (string) $this->drain(new Antigravity(fallback: $secondUrl, failover: $failover), $this->model($url), 'gemini-3-flash', 'low', new Context([new UserMessage('hi')]));
 
         // No status in it: the digits alone are what the session's retry pattern reads.
         $this->assertSame(
-            'Antigravity API error (request-failed, endpoint=' . rtrim($url, '/') . ', project=proj-1, runtimeModel=gemini-3-flash, matched=static:gemini-3-flash, available=' . implode(',', \PigAntigravity\Routing::models()) . '): '
-            . 'This model is unavailable right now (Resource has been exhausted (e.g. check quota).), so the request was stopped and not sent again: refusals like this one, repeated, can put the account at risk. Next: wait a while before sending again.',
+            'Antigravity API error (request-failed, endpoint=' . $secondUrl . ', project=proj-1, runtimeModel=gemini-3-flash, matched=static:gemini-3-flash, available=' . implode(',', \PigAntigravity\Routing::models()) . '): '
+            . 'This model is unavailable right now (Resource has been exhausted (e.g. check quota).). Next: switch to gemini-3.8-flash or another Flash model. This is not necessarily an account quota wall.',
             $message,
         );
         $this->assertFalse(\Pig\Ai\Utils\Retry::isRetryableAssistantError(new AssistantMessage([], Api::Extension, 'antigravity', 'm', new \Pig\Ai\Usage(), StopReason::Error, $message)));
-        $this->assertSame(1, $first->connections());
-        $this->assertSame('', $second->receivedHead(), 'the second host was never asked');
+        $this->assertNotSame('', $second->receivedHead(), 'the second host was asked');
+        $this->assertSame([1, 1], [$first->connections(), $second->connections()], 'each once');
+        $this->assertSame(0, $asked, 'and no other account either: it is not a quota wall');
 
         // The statuses the session does retry keep their number — where pig is narrower than upstream.
         $busy = new CannedServer();
@@ -607,19 +600,160 @@ final class AntigravityApiTest extends TestCase
         $this->assertTrue(\Pig\Ai\Utils\Retry::isRetryableAssistantError(new AssistantMessage([], Api::Extension, 'antigravity', 'm', new \Pig\Ai\Usage(), StopReason::Error, $busyMessage)));
     }
 
-    public function testATierOutOfCapacityIsNotSteppedToASiblingTier(): void
+    public function testATierOutOfCapacityStepsToASiblingTierOfTheSameModel(): void
     {
-        // Upstream 0.13 (#122, #125) asks the same model's other tiers; here the 429 ends it.
+        // pi-antigravity 0.13 (#122, #125): a tier that answers the generic 429 on every endpoint
+        // may be the only one of its model out of capacity, so the same-generation tiers are
+        // asked, highest first, before the turn fails.
+        $ok = $this->okPieces([['response' => ['candidates' => [['content' => ['parts' => [['text' => 'from high']]], 'finishReason' => 'STOP']]]]]);
         $url = $this->server->startSequence([
             [self::refusal(429, 'Resource has been exhausted (e.g. check quota).')],
-            [self::refusal(200, 'unused')],
+            $ok,
         ]);
+
+        // One host, so the second answer is the sibling tier's and not the other endpoint's.
+        $failure = $this->drain(new Antigravity(fallback: rtrim($url, '/')), $this->model($url), 'gemini-3.8-flash', 'medium', new Context([new UserMessage('hi')]));
+
+        $this->assertNull($failure);
+        $this->assertSame(2, $this->server->connections());
+        $this->assertStringContainsString('"model":"gemini-3.8-flash-high"', $this->server->received());
+        $this->assertStringContainsString('"model_enum":"' . \PigAntigravity\Routing::enumOf('gemini-3.8-flash-high') . '"', $this->server->received());
+    }
+
+    public function testAModelOutOfCapacityOnEveryTierFailsOnceAndIsNotRetried(): void
+    {
+        $refusal = [self::refusal(429, 'Resource has been exhausted (e.g. check quota).')];
+        $url = $this->server->startSequence([$refusal, $refusal, $refusal, $refusal, $refusal]);
 
         $message = (string) $this->drain(new Antigravity(fallback: rtrim($url, '/')), $this->model($url), 'gemini-3.8-flash', 'medium', new Context([new UserMessage('hi')]));
 
-        $this->assertSame(1, $this->server->connections());
-        $this->assertStringContainsString('runtimeModel=gemini-3.8-flash-medium,', $message);
+        // medium, then high and low: every tier the tables route this model to, each asked once.
+        $this->assertSame(3, $this->server->connections());
+        $this->assertStringStartsWith('Antigravity API error (request-failed, endpoint=', $message);
+        $this->assertStringContainsString('runtimeModel=gemini-3.8-flash-low,', $message);
         $this->assertStringContainsString('This model is unavailable right now (', $message);
+        $this->assertFalse(\Pig\Ai\Utils\Retry::isRetryableAssistantError(new AssistantMessage([], Api::Extension, 'antigravity', 'm', new \Pig\Ai\Usage(), StopReason::Error, $message)));
+    }
+
+    public function testACapacityRefusalWalksTheBackoffLadderAndTheSameRequestThenSucceeds(): void
+    {
+        // pi-antigravity 0.15 (#158, #159): a generic 429 on every endpoint and tier, then the
+        // same request again after the ladder's wait, which the shared pool answers once it drains.
+        putenv('ANTIGRAVITY_CAPACITY_ATTEMPTS');
+        // Two steps of no wait: three requests at most, as the four default steps make five.
+        putenv('ANTIGRAVITY_CAPACITY_BACKOFF_MS=0,0');
+        $refusal = [self::refusal(429, 'Resource has been exhausted (e.g. check quota).')];
+        $ok = $this->okPieces([['response' => ['candidates' => [['content' => ['parts' => [['text' => 'drained']]], 'finishReason' => 'STOP']]]]]);
+        // A model with no sibling tiers or fallback: one request per pass.
+        $url = $this->server->startSequence([$refusal, $refusal, $ok]);
+
+        $this->assertNull($this->drain(new Antigravity(fallback: rtrim($url, '/')), $this->model($url), 'gemini-3-flash', 'low', new Context([new UserMessage('hi')])));
+        $this->assertSame(3, $this->server->connections(), 'the first request and two steps of the ladder');
+    }
+
+    public function testTheLadderStopsAtItsLastStepWithTheNonRetryableSentence(): void
+    {
+        putenv('ANTIGRAVITY_CAPACITY_ATTEMPTS=3');
+        putenv('ANTIGRAVITY_CAPACITY_BACKOFF_MS=0');
+        $refusal = [self::refusal(429, 'Resource has been exhausted (e.g. check quota).')];
+        $url = $this->server->startSequence([$refusal, $refusal, $refusal, $refusal]);
+
+        $message = (string) $this->drain(new Antigravity(fallback: rtrim($url, '/')), $this->model($url), 'gemini-3-flash', 'low', new Context([new UserMessage('hi')]));
+
+        $this->assertSame(3, $this->server->connections(), '`ANTIGRAVITY_CAPACITY_ATTEMPTS` requests, then the turn fails');
+        $this->assertStringContainsString('This model is unavailable right now', $message);
+        $this->assertFalse(\Pig\Ai\Utils\Retry::isRetryableAssistantError(new AssistantMessage([], Api::Extension, 'antigravity', 'm', new \Pig\Ai\Usage(), StopReason::Error, $message)), 'and the session does not send it again: ' . $message);
+    }
+
+    public function testTheDayAnAccountReachesItsLimitOf429sNothingMoreIsSentOnIt(): void
+    {
+        // pig's own, as the developer asked: every 429 counts, and at the limit the request is
+        // held back here and the turn ends with a sentence the session does not send again.
+        $settings = $this->settingsWith(['antigravity' => ['daily429Limit' => 2]]);
+        \PigAntigravity\DailyRateLimits::useFiles(sys_get_temp_dir() . '/pa-429-' . bin2hex(random_bytes(4)) . '.json', $settings);
+        putenv('ANTIGRAVITY_CAPACITY_ATTEMPTS=10');
+        putenv('ANTIGRAVITY_CAPACITY_BACKOFF_MS=0');
+        $refusal = [self::refusal(429, 'Resource has been exhausted (e.g. check quota).')];
+        $url = $this->server->startSequence(array_fill(0, 10, $refusal));
+        $context = new Context([new UserMessage('hi')]);
+
+        $message = (string) $this->drain(new Antigravity(fallback: rtrim($url, '/')), $this->model($url), 'gemini-3-flash', 'low', $context);
+
+        $this->assertSame(2, $this->server->connections(), 'the ladder stops at the second 429, not at its tenth step');
+        $this->assertStringStartsWith('Antigravity is stopped on this account for today', $message);
+        $this->assertFalse(\Pig\Ai\Utils\Retry::isRetryableAssistantError(new AssistantMessage([], Api::Extension, 'antigravity', 'm', new \Pig\Ai\Usage(), StopReason::Error, $message)), 'and the session does not send it again: ' . $message);
+
+        // The next turn sends nothing at all.
+        $this->drain(new Antigravity(fallback: rtrim($url, '/')), $this->model($url), 'gemini-3-flash', 'low', $context);
+        $this->assertSame(2, $this->server->connections());
+    }
+
+    /** @param array<string, mixed> $settings */
+    private function settingsWith(array $settings): string
+    {
+        $path = sys_get_temp_dir() . '/pa-settings-' . bin2hex(random_bytes(4)) . '.json';
+        file_put_contents($path, (string) json_encode($settings));
+
+        return $path;
+    }
+
+    public function testA503WithNoCapacityIsOnTheLadderAndAQuotaWallIsNot(): void
+    {
+        $this->assertTrue(Antigravity::isCapacityFailure(503, 'No capacity available for model'));
+        $this->assertTrue(Antigravity::isCapacityFailure(429, 'Resource has been exhausted (e.g. check quota).'));
+        $this->assertFalse(Antigravity::isCapacityFailure(429, 'Individual quota reached. Resets in 2h'));
+        $this->assertFalse(Antigravity::isCapacityFailure(429, 'Quota exceeded. Resets in 2h'));
+        $this->assertFalse(Antigravity::isCapacityFailure(503, 'Service unavailable'));
+        $this->assertFalse(Antigravity::isCapacityFailure(500, 'Resource has been exhausted'));
+    }
+
+    public function testTheAttemptLimitIsTheLadderPlusOneOrWhatTheEnvironmentSays(): void
+    {
+        putenv('ANTIGRAVITY_CAPACITY_ATTEMPTS');
+        $this->assertSame(5, Antigravity::capacityAttemptLimit(), 'the first request and four steps: 3, 8, 15, 25 s');
+        putenv('ANTIGRAVITY_CAPACITY_BACKOFF_MS=100, 200,nope');
+        $this->assertSame(3, Antigravity::capacityAttemptLimit());
+        putenv('ANTIGRAVITY_CAPACITY_ATTEMPTS=11');
+        $this->assertSame(3, Antigravity::capacityAttemptLimit(), 'out of 1–10, ignored');
+        putenv('ANTIGRAVITY_CAPACITY_ATTEMPTS=2');
+        $this->assertSame(2, Antigravity::capacityAttemptLimit());
+    }
+
+    public function testTheRouteACapacityWalkEndedOnIsTriedFirstNextTurnAndForgottenWhenItFails(): void
+    {
+        // pi-antigravity 0.15 (#146): a sibling tier that answered is remembered for the account,
+        // project and initial runtime model, so the next turn does not replay the dead tier.
+        $refusal = [self::refusal(429, 'Resource has been exhausted (e.g. check quota).')];
+        $ok = fn (string $text): array => $this->okPieces([['response' => ['candidates' => [['content' => ['parts' => [['text' => $text]]], 'finishReason' => 'STOP']]]]]);
+        $url = $this->server->startSequence([$refusal, $ok('one'), $ok('two'), [self::refusal(500, 'boom')], $refusal, $ok('three')]);
+        $api = new Antigravity(fallback: rtrim($url, '/'));
+
+        $this->assertNull($this->drain($api, $this->model($url), 'gemini-3.8-flash', 'medium', new Context([new UserMessage('hi')])));
+        $this->assertSame(2, $this->server->connections());
+
+        // The next turn goes straight to `-high`: one request.
+        $this->assertNull($this->drain($api, $this->model($url), 'gemini-3.8-flash', 'medium', new Context([new UserMessage('again')])));
+        $this->assertSame(3, $this->server->connections());
+        preg_match_all('/"model":"([^"]+)"/', $this->server->received(), $models);
+        $this->assertSame('gemini-3.8-flash-high', end($models[1]), 'the last request');
+
+        // Its probe fails: forgotten, and the whole chain from `-medium` again.
+        $this->assertNull($this->drain($api, $this->model($url), 'gemini-3.8-flash', 'medium', new Context([new UserMessage('and again')])));
+        $this->assertSame(6, $this->server->connections());
+    }
+
+    public function testRememberedRoutesExpireAndAreBounded(): void
+    {
+        Antigravity::rememberCapacityRoute('k', 'gemini-3.8-flash-high', 'https://e', now: 1_000);
+        $this->assertSame(['runtime' => 'gemini-3.8-flash-high', 'endpoint' => 'https://e'], Antigravity::rememberedCapacityRoute('k', now: 1_000 + 599_999));
+        $this->assertNull(Antigravity::rememberedCapacityRoute('k', now: 1_000 + 600_000), 'ten minutes');
+
+        for ($i = 0; $i < 65; $i++) {
+            Antigravity::rememberCapacityRoute("k{$i}", 'r', 'e', now: 0);
+        }
+
+        $this->assertNull(Antigravity::rememberedCapacityRoute('k0', now: 1), 'sixty-four at most, the oldest going first');
+        $this->assertNotNull(Antigravity::rememberedCapacityRoute('k64', now: 1));
     }
 
     public function testAQuotaWallIsNotATierOutOfCapacity(): void
@@ -706,10 +840,38 @@ final class AntigravityApiTest extends TestCase
         $this->assertSame('gemini-3-flash', $this->server->receivedJson()['model']);
 
         // When none can be: the transport's own words, which are what the session retries on —
-        // not "No endpoint to try".
+        // not "No endpoint to try". A new scenario, so the route the first one ended on (the
+        // fallback endpoint, remembered as upstream's `rememberCapacityRoute()` does) is forgotten.
+        Antigravity::forgetCapacityRoutes();
         $message = (string) $this->drain(new Antigravity(fallback: 'http://127.0.0.1:1'), $this->model('http://127.0.0.1:1'), 'gemini-3-flash', 'low', new Context([new UserMessage('again')]));
         $this->assertStringContainsStringIgnoringCase('connect', $message);
         $this->assertTrue(\Pig\Ai\Utils\Retry::isRetryableAssistantError(new AssistantMessage([], Api::Extension, 'antigravity', 'm', new \Pig\Ai\Usage(), StopReason::Error, $message)), $message);
+    }
+
+    public function testAQuotaWallFailsOverToTheNextAccountAndSendsAgain(): void
+    {
+        // pi-antigravity's `failoverToNextAccount()`: the next account not yet tried, inside the
+        // same request. pig used to do this from the session's `before_retry` hook.
+        $tried = [];
+        $failover = static function (array $tokens) use (&$tried): ?string {
+            $tried[] = $tokens;
+
+            return count($tried) === 1 ? (string) json_encode(['token' => 'second-token', 'projectId' => 'second-project']) : null;
+        };
+
+        $replies = [
+            [self::refusal(429, 'Individual quota reached. Resets in 5m.')],
+            $this->okPieces([['response' => ['candidates' => [['content' => ['parts' => [['text' => 'ok']]], 'finishReason' => 'STOP']]]]]),
+        ];
+        $url = $this->server->startSequence($replies);
+
+        $message = $this->drain(new Antigravity(fallback: $url, failover: $failover), $this->model($url), 'gemini-3-flash', 'low', new Context([new UserMessage('hi')]));
+
+        $this->assertNull($message);
+        $this->assertCount(1, $tried);
+        $this->assertSame(2, $this->server->connections());
+        $this->assertStringContainsString('authorization: Bearer second-token', $this->server->received());
+        $this->assertStringContainsString('"project":"second-project"', $this->server->received());
     }
 
     public function testAnEmptyResponseIsAskedForAgainBeforeTheTurnFails(): void

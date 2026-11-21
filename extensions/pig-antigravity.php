@@ -23,9 +23,9 @@ declare(strict_types=1);
  * - **`Auth::useSecondStore()`** is where `antigravity-accounts.json` meets `auth.json`: the
  *   session reads the active account when `auth.json` has none, and tells the store about a
  *   renewal so the extension's copy of a token does not go stale.
- * - **No 429 failover**, where pi-antigravity switches to the next stored account at a quota wall
- *   and sends again: a 429 ends the request (`AntigravityApi::send()`), and changing account is
- *   `/antigravity.accounts rotate`, by hand.
+ * - **The 429 failover** is the protocol's own, as pi-antigravity has it: a quota wall on one
+ *   account is answered inside the request by switching to the next stored account and sending
+ *   again (`AntigravityApi`'s `$failover`, below).
  * - **`registerWebPanel()`** is the web UI's accounts panel (`AccountsPanel`), which used to be
  *   written into the page: the extension describes it, the page draws it in the sidebar's
  *   Extensions group, and `/accounts` opens it.
@@ -64,6 +64,8 @@ use PigAntigravity\AntigravityApi;
 use PigAntigravity\AntigravityOauth;
 use PigAntigravity\Catalog;
 use PigAntigravity\Credits;
+use PigAntigravity\DailyLimitedTransport;
+use PigAntigravity\DailyRateLimits;
 use PigAntigravity\Discovery;
 use PigAntigravity\Enterprise;
 use PigAntigravity\GoogleSearch;
@@ -110,7 +112,11 @@ return function (ExtensionApi $pig): void {
         $accounts->syncCurrentAuth($auth->kind(Models::PROVIDER) === 'oauth' ? $auth->credentials(Models::PROVIDER) : null);
     };
 
-    $http = new HttpClient();
+    // Every request to Google is counted against its account's daily limit of 429s by the id it is
+    // filed under in the store, so a token renewed every hour does not start the count afresh.
+    DailyRateLimits::useAccounts(static fn (string $token): ?string => $accounts->idOfAccess($token));
+
+    $http = new DailyLimitedTransport(new HttpClient());
 
     /**
      * The OAuth client to sign in and renew under: the environment, then the settings file, then
@@ -134,6 +140,48 @@ return function (ExtensionApi $pig): void {
     };
 
     // ---- the provider -------------------------------------------------------------------
+
+    /**
+     * pi-antigravity's `failoverToNextAccount(triedAccessTokens)`, at a quota wall: the stored
+     * accounts in the order they were added (`Accounts::sortedIds()`) whose access token has not
+     * been tried, each renewed first when due (`ensureFresh()`) — "Skip accounts whose refresh
+     * token is no longer valid" — and the first that is left made the active one in both files;
+     * its api key, or null when none is.
+     *
+     * `$ensureFresh` and `$activate` are made further down, with the OAuth client; the request only
+     * comes long after.
+     *
+     * @param list<string> $tried
+     */
+    $failover = static function (array $tried) use ($auth, $accounts, $sync, &$ensureFresh, &$activate): ?string {
+        $sync();
+
+        foreach ($accounts->sortedIds() as $id) {
+            // Nor one that had today's limit of 429s (`DailyRateLimits`), pig's own.
+            if (in_array($accounts->accessOf($id), $tried, true) || DailyRateLimits::exceeded($id)) {
+                continue;
+            }
+
+            try {
+                $fresh = $ensureFresh($id);
+            } catch (\Throwable) {
+                // Upstream's: "Skip accounts whose refresh token is no longer valid."
+                continue;
+            }
+
+            if ($fresh === null || $accounts->accessOf($fresh) === '' || in_array($accounts->accessOf($fresh), $tried, true)) {
+                continue;
+            }
+
+            if ($activate($fresh) === null) {
+                continue;
+            }
+
+            return $auth->apiKey(Models::PROVIDER);
+        }
+
+        return null;
+    };
 
     // Resold: `claude-sonnet-5-5` is Anthropic's id, and a bare `--model sonnet` has to keep
     // meaning Anthropic's — see `Models::RESOLD` in the core for the rule this joins.
@@ -184,7 +232,7 @@ return function (ExtensionApi $pig): void {
         id: Models::PROVIDER,
         name: 'Antigravity (Gemini 3, Claude, GPT-OSS)',
         models: Models::fallback(),
-        api: new AntigravityApi(),
+        api: new AntigravityApi(failover: $failover),
         oauth: $oauth,
         resold: true,
         images: ImageGenerator::models(),

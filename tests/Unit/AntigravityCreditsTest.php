@@ -16,7 +16,6 @@ use Pig\Test\CannedServer;
 use PigAntigravity\AntigravityApi;
 use PigAntigravity\Credits;
 use PigAntigravity\QuotaClient;
-use PigAntigravity\RateLimited;
 
 /** Google One AI credit overages: pi-antigravity 0.13's `utils/credits.ts` and what reads it. */
 final class AntigravityCreditsTest extends TestCase
@@ -121,6 +120,8 @@ final class AntigravityCreditsTest extends TestCase
         $empty = 'Your AI credits balance is exhausted. Please refill credits in Google One or wait for your regular quota to reset. Next: switch models or retry later.';
         $this->assertSame($empty, AntigravityApi::friendlyAntigravityError(429, '{"error":{"message":"AI credits balance is too low"}}'));
         $this->assertSame($empty, AntigravityApi::friendlyAntigravityError(429, 'INSUFFICIENT_G1_CREDITS'));
+        // A wall for the request loop: no other endpoint, no sibling tier.
+        $this->assertTrue(AntigravityApi::isQuotaWall('INSUFFICIENT_G1_CREDITS'));
     }
 
     public function testBalancesAreReadUnderEitherSpellingAndOnlyWhereThereIsAnAmount(): void
@@ -165,23 +166,6 @@ final class AntigravityCreditsTest extends TestCase
         // The last request: the catalog, asked under the credential's project.
         $this->assertStringContainsString('/v1internal:fetchAvailableModels', $server->received());
         $this->assertStringContainsString('{"project":"stored-project"}', $server->received());
-    }
-
-    public function testA429EndsAUsageReadAtThatOneRequest(): void
-    {
-        // Three requests make a usage read, each on every endpoint; the first 429 is the last.
-        $refusal = "HTTP/1.1 429 Refused\r\nContent-Length: 2\r\n\r\n{}";
-        $server = new CannedServer();
-        $url = $server->startSequence([[$refusal], [$refusal], [$refusal]]);
-
-        try {
-            Async::run(static fn (): array => (new QuotaClient(endpoint: rtrim($url, '/')))->fetchUsage('ya29.a', 'proj-1'));
-            $this->fail('read');
-        } catch (RateLimited $error) {
-            $this->assertStringStartsWith('The request to /v1internal:loadCodeAssist stopped at the first refusal, and nothing was sent again: ', $error->getMessage());
-        }
-
-        $this->assertSame(1, $server->connections());
     }
 
     public function testTheBalanceIsThePaidTiersThenTheCurrentTiersThenTheAnswersOwn(): void

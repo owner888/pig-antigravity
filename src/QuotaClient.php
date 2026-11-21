@@ -6,6 +6,7 @@ namespace PigAntigravity;
 
 use Closure;
 use Pig\Ai\Http\HttpClient;
+use Pig\Ai\Http\HttpTransport;
 use Pig\Ai\Http\Request;
 use RuntimeException;
 use Throwable;
@@ -27,7 +28,7 @@ final class QuotaClient
     public const string DEFAULT_ENDPOINT = 'https://daily-cloudcode-pa.googleapis.com';
 
     public function __construct(
-        private readonly ?HttpClient $http = null,
+        private readonly ?HttpTransport $http = null,
         private readonly ?string $endpoint = null,
     ) {
     }
@@ -47,7 +48,7 @@ final class QuotaClient
      */
     public function fetchUsage(string $token, ?string $projectId = null): array
     {
-        $http = $this->http ?? new HttpClient(15.0);
+        $http = $this->http ?? new DailyLimitedTransport(new HttpClient(15.0));
         $candidates = $this->endpoint !== null ? [$this->endpoint] : Discovery::endpointCandidates();
         // `creds.projectId || resolveProjectId(...)`: the credential's, else the default id.
         $initialProject = $projectId !== null && $projectId !== '' ? $projectId : AntigravityOauth::defaultProjectId('antigravity-default');
@@ -73,9 +74,12 @@ final class QuotaClient
             $quotaRes = $this->postJson($http, $candidates, '/v1internal:retrieveUserQuotaSummary', $token, []);
             $quotaData = $quotaRes['data'];
             $endpointUsed = $quotaRes['endpoint'];
-        } catch (RateLimited $e) {
-            throw $e;
         } catch (Throwable $e) {
+            // A day over its limit of 429s is the turn's answer, never a host to pass over.
+            if ($e instanceof DailyLimitReached) {
+                throw $e;
+            }
+
             $quotaError = $e->getMessage();
             $endpointUsed = $candidates[0];
         }
@@ -263,7 +267,7 @@ final class QuotaClient
      * @return array{endpoint: string, data: mixed}
      */
     private function postJson(
-        HttpClient $http,
+        HttpTransport $http,
         array $candidates,
         string $path,
         string $token,
@@ -294,19 +298,18 @@ final class QuotaClient
                     ? (string) $data['error']['message']
                     : $text;
 
-                if ($response->status === 429) {
-                    throw RateLimited::during("The request to {$path}", $text);
-                }
-
                 $lastError = "{$path} failed ({$response->status}): " . substr($errMsg, 0, 300);
 
                 // For fatal client errors (not 403/404/5xx), don't keep hammering other candidates
-                if (!in_array($response->status, [403, 404, 500, 502, 503, 504], true)) {
+                if (!in_array($response->status, [403, 404, 429, 500, 502, 503, 504], true)) {
                     throw new RuntimeException($lastError);
                 }
-            } catch (RateLimited $e) {
-                throw $e;
             } catch (Throwable $e) {
+                // A day over its limit of 429s is the turn's answer, never a host to pass over.
+                if ($e instanceof DailyLimitReached) {
+                    throw $e;
+                }
+
                 $lastError = $e->getMessage();
             }
         }
@@ -318,7 +321,7 @@ final class QuotaClient
      * @param list<string> $candidates
      */
     private function postJsonSafe(
-        HttpClient $http,
+        HttpTransport $http,
         array $candidates,
         string $path,
         string $token,
@@ -328,9 +331,12 @@ final class QuotaClient
             $res = $this->postJson($http, $candidates, $path, $token, $body);
 
             return $res['data'];
-        } catch (RateLimited $e) {
-            throw $e;
-        } catch (Throwable) {
+        } catch (Throwable $error) {
+            // A day over its limit of 429s is the turn's answer, never a host to pass over.
+            if ($error instanceof DailyLimitReached) {
+                throw $error;
+            }
+
             return null;
         }
     }
@@ -432,7 +438,7 @@ final class QuotaClient
      */
     public function fetchRemainingCredits(string $token, ?string $projectId = null): array
     {
-        $http = $this->http ?? new HttpClient(15.0);
+        $http = $this->http ?? new DailyLimitedTransport(new HttpClient(15.0));
         $assistData = $this->postJsonSafe($http, $this->endpoint !== null ? [$this->endpoint] : Discovery::endpointCandidates(), '/v1internal:loadCodeAssist', $token, [
             'metadata' => [
                 'ideType' => 'ANTIGRAVITY',

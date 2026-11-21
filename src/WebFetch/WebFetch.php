@@ -6,6 +6,8 @@ namespace PigAntigravity\WebFetch;
 
 use ArrayObject;
 use Pig\Ai\Http\HttpClient;
+use Pig\Ai\Http\HttpTransport;
+use PigAntigravity\DailyLimitedTransport;
 use Pig\Ai\Http\Request;
 use Pig\Async\AbortController;
 use Pig\Async\AbortSignal;
@@ -182,7 +184,7 @@ final class WebFetch
      * @param array<string, mixed> $body
      * @return array{status: int, data: mixed, text: string}
      */
-    private static function postJson(HttpClient $http, string $endpoint, string $path, string $token, array $body, AbortSignal $signal): array
+    private static function postJson(HttpTransport $http, string $endpoint, string $path, string $token, array $body, AbortSignal $signal): array
     {
         $response = $http->send(new Request('POST', rtrim($endpoint, '/') . $path, Discovery::headers($token), (string) json_encode($body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)), $signal);
         $tooLarge = static fn (): FetchRefused => new FetchRefused('The fetch response was too large to read safely.', fatal: true, status: 413);
@@ -266,7 +268,7 @@ final class WebFetch
         ?int $maxChars = null,
         ?int $timeoutMs = null,
         ?AbortSignal $signal = null,
-        ?HttpClient $http = null,
+        ?HttpTransport $http = null,
         ?array $endpoints = null,
     ): array {
         try {
@@ -279,6 +281,11 @@ final class WebFetch
 
             throw $error;
         } catch (Throwable $error) {
+            // A day over its limit of 429s is the turn's answer, never a host to pass over.
+            if ($error instanceof \PigAntigravity\DailyLimitReached) {
+                throw $error;
+            }
+
             // Anything else is told in the same shape, its cause's text redacted and nothing more kept.
             self::$lastTrace = null;
             $checked = PublicUrl::check($url);
@@ -295,7 +302,7 @@ final class WebFetch
      * @param list<string>|null $endpointList
      * @return array<string, mixed>
      */
-    private static function fetchPage(?string $apiKey, string $url, bool $raw, ?int $maxCharsAsked, int $timeoutMs, ?AbortSignal $callerSignal, ?HttpClient $http, ?array $endpointList): array
+    private static function fetchPage(?string $apiKey, string $url, bool $raw, ?int $maxCharsAsked, int $timeoutMs, ?AbortSignal $callerSignal, ?HttpTransport $http, ?array $endpointList): array
     {
         if ($callerSignal?->aborted() ?? false) {
             throw new RuntimeException('Web fetch aborted');
@@ -305,7 +312,7 @@ final class WebFetch
         self::rejectPdfUrl($requestedUrl);
         [$token] = AntigravityApi::credentials($apiKey);
         $maxChars = self::resolveMaxChars($maxCharsAsked);
-        $http ??= new HttpClient($timeoutMs / 1000);
+        $http ??= new DailyLimitedTransport(new HttpClient($timeoutMs / 1000));
         $endpoints = $endpointList ?? Discovery::endpointCandidates();
 
         // One deadline for the whole read, and the caller's abort, as one signal.
@@ -333,7 +340,7 @@ final class WebFetch
      * @param list<string> $endpoints
      * @return array<string, mixed>
      */
-    private static function retrieve(string $requestedUrl, string $token, bool $raw, int $maxChars, HttpClient $http, array $endpoints, AbortSignal $signal, ?AbortSignal $callerSignal, bool &$timedOut): array
+    private static function retrieve(string $requestedUrl, string $token, bool $raw, int $maxChars, HttpTransport $http, array $endpoints, AbortSignal $signal, ?AbortSignal $callerSignal, bool &$timedOut): array
     {
         /** @var list<ArrayObject<string, string>> $attempts each mutated in place, as upstream's objects are */
         $attempts = [];
@@ -347,16 +354,9 @@ final class WebFetch
         $alternateTried = false;
         $unavailable = [];
         $requested = [];
-        $rateLimited = false;
 
         // "Per-request dispatch owns endpoint failover; never repeat the whole retrieval flow."
-        $request = static function (string $path, array $body) use (&$attempts, &$requests, &$endpointAnswered, &$unavailable, &$requested, &$lastError, &$rateLimited, $endpoints, $http, $token, $signal): array {
-            // The developer's choice, not upstream's: after a 429 no stage asks Google again
-            // (`RateLimited`); what was read before it is still returned.
-            if ($rateLimited) {
-                throw new FetchRefused('Google answered HTTP 429 to this account, so the read stopped there and nothing more was asked. Do not call read_url_content again now; wait, or open the page in a browser.', fatal: true, status: 429);
-            }
-
+        $request = static function (string $path, array $body) use (&$attempts, &$requests, &$endpointAnswered, &$unavailable, &$requested, &$lastError, $endpoints, $http, $token, $signal): array {
             if ($path === self::REWRITE_URI_PATH) {
                 $attempts[] = new ArrayObject([
                     'url' => Text::clean(Redaction::redactSecrets((string) ($body['originalUri'] ?? '')), 2_048) ?? '',
@@ -389,6 +389,11 @@ final class WebFetch
                 try {
                     $response = self::postJson($http, $endpoint, $path, $token, $body, $signal);
                 } catch (Throwable $error) {
+                    // A day over its limit of 429s is the turn's answer, never a host to pass over.
+                    if ($error instanceof \PigAntigravity\DailyLimitReached) {
+                        throw $error;
+                    }
+
                     if ($signal->aborted() || ($error instanceof FetchRefused && $error->fatal)) {
                         throw $error;
                     }
@@ -415,8 +420,6 @@ final class WebFetch
                 if ($path === self::TRAWLER_FETCH_PATH) {
                     $endpointAnswered = true;
                 }
-
-                $rateLimited = $response['status'] === 429;
 
                 return $response;
             }
@@ -523,6 +526,11 @@ final class WebFetch
                         return $result($candidate);
                     }
                 } catch (Throwable $error) {
+                    // A day over its limit of 429s is the turn's answer, never a host to pass over.
+                    if ($error instanceof \PigAntigravity\DailyLimitReached) {
+                        throw $error;
+                    }
+
                     // Every failure of one stage is weighed here: told at once when nothing usable
                     // is in hand and trying further is pointless, kept as the reason otherwise.
                     $aborted();
@@ -636,6 +644,11 @@ final class WebFetch
                         }
                     }
                 } catch (Throwable $error) {
+                    // A day over its limit of 429s is the turn's answer, never a host to pass over.
+                    if ($error instanceof \PigAntigravity\DailyLimitReached) {
+                        throw $error;
+                    }
+
                     // The other copy is a recovery: its failure is only the turn's when nothing
                     // usable was read before it.
                     $aborted();
@@ -753,6 +766,11 @@ final class WebFetch
             $redirect = self::field($response['data'], 'redirectUri', 'redirect_uri', 'rewrittenUri');
             $redirect = $redirect === null ? null : Text::trim($redirect);
         } catch (Throwable $error) {
+            // A day over its limit of 429s is the turn's answer, never a host to pass over.
+            if ($error instanceof \PigAntigravity\DailyLimitReached) {
+                throw $error;
+            }
+
             // "Original-page resolution is best-effort. Alternate recovery must fail closed."
             if ($strict) {
                 throw $error;

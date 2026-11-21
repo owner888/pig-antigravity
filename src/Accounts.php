@@ -209,6 +209,42 @@ final class Accounts
         return $nextId === $this->active ? null : $nextId;
     }
 
+    /**
+     * pi-antigravity's `sortedAccounts()`: the order accounts were added in, `accountId` breaking a
+     * tie — the order `failoverToNextAccount()` tries them in.
+     *
+     * @return list<string>
+     */
+    public function sortedIds(): array
+    {
+        $ids = array_keys($this->accounts);
+        usort($ids, function (string $a, string $b): int {
+            $byAdded = ($this->accounts[$a]['addedAt'] ?? 0) <=> ($this->accounts[$b]['addedAt'] ?? 0);
+
+            return $byAdded !== 0 ? $byAdded : strcmp((string) ($this->accounts[$a]['accountId'] ?? $a), (string) ($this->accounts[$b]['accountId'] ?? $b));
+        });
+
+        return $ids;
+    }
+
+    /** The account whose stored access token is $access, or null when none is. */
+    public function idOfAccess(string $access): ?string
+    {
+        foreach ($this->accounts as $id => $account) {
+            if ($access !== '' && ($account['access'] ?? null) === $access) {
+                return (string) $id;
+            }
+        }
+
+        return null;
+    }
+
+    /** The access token stored for $id, or '' with none. */
+    public function accessOf(string $id): string
+    {
+        return (string) ($this->accounts[$id]['access'] ?? '');
+    }
+
     /** How many sign-ins are in the store, which is the only thing `/login` would want to say. */
     public function count(): int
     {

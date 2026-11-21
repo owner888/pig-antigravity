@@ -7,7 +7,6 @@ namespace PigAntigravity\Test\Unit;
 use PHPUnit\Framework\TestCase;
 use Pig\Ai\Http\HttpClient;
 use PigAntigravity\GoogleSearch;
-use PigAntigravity\RateLimited;
 use Pig\Test\CannedServer;
 
 final class AntigravitySearchTest extends TestCase
@@ -198,25 +197,5 @@ final class AntigravitySearchTest extends TestCase
         $this->assertStringContainsString('*Search queries: `pig coding agent php`*', $result);
 
         $server->stop();
-    }
-
-    public function testA429EndsTheSearchAtThatOneRequest(): void
-    {
-        // The developer's choice: upstream asks the next endpoint and the next model.
-        $body = '{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}';
-        $first = new CannedServer();
-        $url = $first->start(["HTTP/1.1 429 Refused\r\nContent-Length: " . strlen($body) . "\r\n\r\n" . $body]);
-        $second = new CannedServer();
-        $secondUrl = $second->start(["HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"]);
-
-        try {
-            \Pig\Async\Async::run(static fn (): string => GoogleSearch::executeSearch(new HttpClient(5.0), 'test-token', 'test-proj', 'pig', endpoints: [$url, $secondUrl]));
-            $this->fail('searched');
-        } catch (RateLimited $error) {
-            $this->assertStringStartsWith('Antigravity Google Search stopped at the first refusal, and nothing was sent again: ', $error->getMessage());
-        }
-
-        $this->assertSame(1, $first->connections());
-        $this->assertSame('', $second->receivedHead(), 'the second host was never asked');
     }
 }

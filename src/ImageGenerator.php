@@ -9,6 +9,7 @@ use Pig\Ai\AssistantImages;
 use Pig\Ai\Cost;
 use Pig\Ai\Extension\ProviderImages;
 use Pig\Ai\Http\HttpClient;
+use Pig\Ai\Http\HttpTransport;
 use Pig\Ai\Http\Request;
 use Pig\Ai\ImageApi;
 use Pig\Ai\ImageContent;
@@ -36,8 +37,8 @@ use Throwable;
  * per attempt, the prompt (and any reference images) as the user turn, an `imageConfig` with the
  * aspect ratio, tried on each of `Discovery::endpointCandidates()` and then on the next model of
  * `MODEL_FALLBACKS` after a 404. The model that answered is the result's `model`, so a fallback is
- * never silent. A 429 ends it at that one request (`RateLimited`), as it does the chat protocol
- * (`AntigravityApi::send()`).
+ * never silent. A 403, 429 or 5xx goes on to the next endpoint, as upstream's does; no other
+ * account is asked (upstream's image request has no failover).
  */
 final class ImageGenerator implements ProviderImages
 {
@@ -73,7 +74,7 @@ final class ImageGenerator implements ProviderImages
      * @param string|null $endpoint the one host to try in place of `Discovery::endpointCandidates()` — for tests
      */
     public function __construct(
-        private readonly ?HttpClient $http = null,
+        private readonly ?HttpTransport $http = null,
         private readonly ?string $endpoint = null,
     ) {
     }
@@ -251,7 +252,7 @@ final class ImageGenerator implements ProviderImages
 
     /**
      * The request loop: the model asked for, then `MODEL_FALLBACKS` after a 404; each on every
-     * endpoint until one answers with images, or with a 429.
+     * endpoint until one answers with images.
      *
      * @param list<ImageContent> $references
      * @return array{0: list<array{data: string, mimeType: string}>, 1: list<string>, 2: string, 3: array<string, mixed>|null}
@@ -261,7 +262,7 @@ final class ImageGenerator implements ProviderImages
     {
         $modelsToTry = array_values(array_unique([$model, ...self::MODEL_FALLBACKS]));
         $candidates = $this->endpoint !== null ? [$this->endpoint] : Discovery::endpointCandidates();
-        $http = $this->http ?? new HttpClient(60.0);
+        $http = $this->http ?? new DailyLimitedTransport(new HttpClient(60.0));
         $parts = [['text' => $prompt]];
 
         foreach ($references as $reference) {
@@ -314,11 +315,6 @@ final class ImageGenerator implements ProviderImages
 
                     if (!$response->isSuccessful()) {
                         $errText = $response->body->all();
-
-                        if ($response->status === 429) {
-                            throw RateLimited::during('Image generation', $errText);
-                        }
-
                         $lastError = "Image generation failed ({$response->status}): " . substr($errText, 0, 300);
 
                         if ($response->status === 404) {
@@ -336,9 +332,12 @@ final class ImageGenerator implements ProviderImages
                     }
 
                     $lastError = 'The response had no image in it' . ($texts !== [] ? ': ' . substr(trim(implode('', $texts)), 0, 300) : '.');
-                } catch (RateLimited $e) {
-                    throw $e;
                 } catch (Throwable $e) {
+                    // A day over its limit of 429s is the turn's answer, never a host to pass over.
+                    if ($e instanceof DailyLimitReached) {
+                        throw $e;
+                    }
+
                     if ($options->signal?->aborted() ?? false) {
                         throw $e;
                     }

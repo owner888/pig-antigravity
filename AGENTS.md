@@ -37,15 +37,16 @@ this says how it is worked on. Keep this file under 100 lines.
 - **Where this is narrower than upstream on purpose**: `publicErrorStatus()` hides the status
   for a 429 only, so a 502/503 keeps its number and is still retried.
 - **Where the wording is not upstream's on purpose**: a 403 for a suspended account ("disabled
-  in this account for violation of Terms of Service") says to appeal, not to re-login; a
-  throttling 429 says it was stopped, not "retrying automatically"; a 429 that names no limit
-  ("this model is unavailable right now") says to wait, not to switch to a Flash model at once.
-- **A 429 ends it, everywhere, with no switch to turn that off** — the developer's choice, where
-  upstream goes on to the other endpoint, a sibling tier, the next model or the next account.
-  One request, then the person decides: chat (`AntigravityApi::send()`), and through
-  `RateLimited` images, search, usage, the catalog; the reader and the sign-in likewise. No 429
-  message may read as retryable to pig's session (`Retry`) — a test holds each to that. When
-  porting an upstream release, its new retry, fallback or failover paths stop at a 429 too.
+  in this account for violation of Terms of Service") says to appeal, not to re-login.
+- **A 429 is handled as upstream handles it**, everywhere: the other endpoint, a sibling tier,
+  the next model, the next account at a quota wall, and the capacity backoff ladder
+  (`AntigravityApi::capacityBackoffMs()`). From 0.14.2 to 0.15 pig stopped at the first 429
+  instead; the developer asked for upstream's behaviour back. Port upstream's 429 paths as they are.
+- **On top of that, a daily limit of 429s per account** (`DailyRateLimits`, pig's own, default 5,
+  `antigravity.daily429Limit`): every client is `new DailyLimitedTransport(new HttpClient(…))`
+  and typed `HttpTransport` (`DailyLimitsTest` checks), and a `catch (Throwable)` that passes a
+  failure over re-throws `DailyLimitReached`. Its message ends the turn and must stay
+  non-retryable (`Retry::isRetryableAssistantError()`).
 - The catalog is the deployment's answer and nothing else; grouping lives only in `Grouping`,
   network, TTL and storage only in `Discovery`, and a routing target with no enum refuses the
   whole catalog (`Catalog`).

@@ -6,6 +6,7 @@ namespace PigAntigravity;
 
 use Closure;
 use Pig\Ai\Http\HttpClient;
+use Pig\Ai\Http\HttpTransport;
 use Pig\Ai\Http\Request;
 use Pig\Ai\Timestamp;
 use Pig\Async\AbortSignal;
@@ -275,9 +276,9 @@ final class Discovery
      * @param list<string>|null $endpoints the hosts to ask; `endpointCandidates()` when null
      * @return array{endpoint: string, status: int, data: array{models: array<string, mixed>, defaultAgentModelId?: string, defaultAgentModel?: string, agentModelSorts?: list<mixed>}}
      */
-    public static function fetchAvailableModelsCatalog(string $token, string $projectId, ?AbortSignal $signal = null, ?HttpClient $http = null, ?array $endpoints = null): array
+    public static function fetchAvailableModelsCatalog(string $token, string $projectId, ?AbortSignal $signal = null, ?HttpTransport $http = null, ?array $endpoints = null): array
     {
-        $http ??= new HttpClient(self::DISCOVERY_TIMEOUT);
+        $http ??= new DailyLimitedTransport(new HttpClient(self::DISCOVERY_TIMEOUT));
         $results = [];
         $lastError = null;
 
@@ -450,7 +451,7 @@ final class Discovery
      * @param list<string>|null $endpoints
      * @return array{catalog: array{models: list<array<string, mixed>>, routing: array<string, array<string, mixed>>}, enums: array<string, string>}
      */
-    public static function discover(string $apiKey, ?AbortSignal $signal = null, ?HttpClient $http = null, ?array $endpoints = null): array
+    public static function discover(string $apiKey, ?AbortSignal $signal = null, ?HttpTransport $http = null, ?array $endpoints = null): array
     {
         $creds = self::parseApiKey($apiKey);
         $available = self::fetchAvailableModelsCatalog($creds['token'], $creds['projectId'], $signal, $http, $endpoints);
@@ -494,7 +495,7 @@ final class Discovery
         bool $force,
         ?AbortSignal $signal,
         Closure $publish,
-        ?HttpClient $http = null,
+        ?HttpTransport $http = null,
         ?array $endpoints = null,
         ?string $refreshToken = null,
     ): array {
@@ -544,6 +545,11 @@ final class Discovery
                 return $next['models'];
             }
         } catch (Throwable $error) {
+            // A day over its limit of 429s is the turn's answer, never a host to pass over.
+            if ($error instanceof DailyLimitReached) {
+                throw $error;
+            }
+
             if ($force) {
                 throw $error;
             }
@@ -618,12 +624,11 @@ final class Discovery
 
     /**
      * `fetchAvailableModelsFromEndpoint()`: the endpoint's answer, or null when it failed — the
-     * failure kept in $lastError, which is what upstream's `setLastError()` does with it. A 429
-     * is thrown (`RateLimited`), so the endpoints after it are not asked.
+     * failure kept in $lastError, which is what upstream's `setLastError()` does with it.
      *
      * @return array{endpoint: string, status: int, data: mixed}|null
      */
-    private static function fetchAvailableModelsFromEndpoint(HttpClient $http, string $endpoint, string $token, string $projectId, ?AbortSignal $signal, ?Throwable &$lastError): ?array
+    private static function fetchAvailableModelsFromEndpoint(HttpTransport $http, string $endpoint, string $token, string $projectId, ?AbortSignal $signal, ?Throwable &$lastError): ?array
     {
         try {
             $response = $http->send(new Request(
@@ -639,10 +644,6 @@ final class Discovery
                 $data = ['raw' => $text];
             }
 
-            if ($response->status === 429) {
-                throw RateLimited::during('The Antigravity model catalog refresh', $text);
-            }
-
             if (!$response->isSuccessful()) {
                 $message = is_array($data) && is_array($data['error'] ?? null) && is_string($data['error']['message'] ?? null)
                     ? $data['error']['message']
@@ -653,9 +654,12 @@ final class Discovery
             }
 
             return ['endpoint' => $endpoint, 'status' => $response->status, 'data' => $data];
-        } catch (RateLimited $error) {
-            throw $error;
         } catch (Throwable $error) {
+            // A day over its limit of 429s is the turn's answer, never a host to pass over.
+            if ($error instanceof DailyLimitReached) {
+                throw $error;
+            }
+
             $lastError = $error;
 
             return null;

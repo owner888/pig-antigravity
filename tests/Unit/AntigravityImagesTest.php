@@ -216,17 +216,19 @@ final class AntigravityImagesTest extends TestCase
         $this->assertSame(ImageGenerator::DEFAULT_MODEL, $result->model);
     }
 
-    public function testA429EndsItAtThatOneRequest(): void
+    public function testA429GoesOnToTheNextEndpointOrModelAndNoOtherAccountIsAsked(): void
     {
-        // The developer's choice: no next endpoint, model or account, where upstream fails over.
-        $url = $this->server->startSequence([[self::refusal(429, 'Resource has been exhausted (e.g. check quota).')], self::ok([self::imageChunk()])]);
+        // pi-antigravity 0.15's image request: "[403, 429, 500, 502, 503, 504]" goes on to the next
+        // endpoint, then the next model; it has no account failover.
+        $url = $this->server->startSequence([[self::refusal(429, 'Individual quota reached. Resets in 5m.')], self::ok([self::imageChunk()])]);
         self::registerAntigravity(images: new ImageGenerator(endpoint: $url));
 
         $result = self::generate('a cat');
 
-        $this->assertSame(StopReason::Error, $result->stopReason);
-        $this->assertStringStartsWith('Image generation stopped at the first refusal, and nothing was sent again: This model is unavailable right now', (string) $result->errorMessage);
-        $this->assertSame(1, $this->server->connections());
+        $this->assertSame(StopReason::Stop, $result->stopReason, (string) $result->errorMessage);
+        $this->assertSame(2, $this->server->connections());
+        $this->assertNotSame(ImageGenerator::DEFAULT_MODEL, $result->model, 'the next model answered');
+        $this->assertStringNotContainsString('second-token', $this->server->received());
     }
 
     public function testEveryRefusalIsAnErrorResultInItsOwnWords(): void
